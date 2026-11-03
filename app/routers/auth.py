@@ -11,7 +11,7 @@ from app.errors import AppError
 from app.models import User, utcnow
 from app.security import create_session_token, hash_password, new_id, normalize_phone, verify_password
 from app.serializers import user_out
-from app.services import github, password_reset
+from app.services import bans, github, password_reset
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -35,6 +35,7 @@ def signup(payload: schemas.SignupIn, response: Response, background: Background
     phone = normalize_phone(payload.phone)
     if len(phone) < 10:
         raise AppError("Enter a valid phone number", 422)
+    bans.ensure_number_allowed(db, phone)
     if db.scalar(select(User.id).where(User.phone_normalized == phone)):
         raise AppError("An account already exists for this phone number", 409)
 
@@ -71,6 +72,7 @@ def login(payload: schemas.LoginIn, response: Response, db: DB):
     user = db.scalar(select(User).where(User.phone_normalized == normalize_phone(payload.phone)))
     if user is None or not verify_password(payload.password, user.password_hash):
         raise AppError("Invalid phone number or password", 401)
+    bans.ensure_can_sign_in(db, user)
     user.last_seen = utcnow()
     db.commit()
     _start_session(response, user)
@@ -95,6 +97,7 @@ def demo_login(user_id: str, response: Response, db: DB, _: OptionalUser):
     user = db.get(User, user_id)
     if user is None:
         raise AppError("User not found", 404)
+    bans.ensure_can_sign_in(db, user)
     _start_session(response, user)
     return user_out(user)
 

@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.errors import AppError
 from app.models import PasswordResetCode, User
+from app.services import bans
 from app.security import (
     create_reset_token,
     e164,
@@ -50,7 +51,8 @@ def request_code(db: Session, phone: str) -> dict:
     settings = get_settings()
     user = _user_by_phone(db, phone)
     reply = {"message": GENERIC, "resend_after": settings.otp_resend_seconds, "dev_code": None}
-    if user is None:
+    # Same answer for a blocked number or suspended account: no code is sent.
+    if user is None or bans.is_blocked(db, user):
         return reply
 
     now = datetime.now(UTC)
@@ -122,6 +124,7 @@ def reset_password(db: Session, token: str, password: str) -> User:
     # The token carries the old password's fingerprint, so it works once and only until a change.
     if not read or user is None or not token_matches_password(read[1], user.password_hash):
         raise AppError("This reset link has expired. Start again.", 400)
+    bans.ensure_can_sign_in(db, user)
     user.password_hash = hash_password(password)
     db.commit()
     return user

@@ -36,7 +36,7 @@ from app.db import SessionLocal
 from app.errors import AppError
 from app.models import Conversation, User, utcnow
 from app.security import read_token, token_matches_password
-from app.services import chat
+from app.services import bans, chat
 
 log = logging.getLogger("app.realtime")
 router = APIRouter(tags=["realtime"])
@@ -65,6 +65,8 @@ def _session_user(token: str | None) -> tuple[str, str] | None:
     with SessionLocal() as db:
         user = db.get(User, user_id)
         if not user or not token_matches_password(fingerprint, user.password_hash):
+            return None
+        if bans.is_blocked(db, user):  # suspended in the admin portal: the socket closes (4401)
             return None
         return user.id, user.name
 

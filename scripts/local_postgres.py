@@ -31,11 +31,15 @@ def main() -> None:
         server.cleanup()
         print("Stopped.")
         return
-    for name in ("capstoneconnect", "capstoneconnect_test"):
-        exists = server.psql(f"select 1 from pg_database where datname = '{name}';")
-        if "(1 row)" not in exists:
-            server.psql(f"create database {name};")
-    port = re.search(r"\d+", server.psql("show port;").split("\n", 2)[2]).group(0)
+    # Through psycopg rather than server.psql(): pgserver runs psql through the shell unquoted,
+    # which breaks when the project path contains a space.
+    import psycopg
+
+    port = re.search(r":(\d+)/", server.get_uri()).group(1)
+    with psycopg.connect(f"postgresql://postgres@127.0.0.1:{port}/postgres", autocommit=True) as conn:
+        for name in ("capstoneconnect", "capstoneconnect_test"):
+            if not conn.execute("select 1 from pg_database where datname = %s", (name,)).fetchone():
+                conn.execute(f'create database "{name}"')
     url = f"postgresql+psycopg://postgres@127.0.0.1:{port}/capstoneconnect"
     write_env(url)
     print(f"PostgreSQL is running: {url}")

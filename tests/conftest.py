@@ -30,6 +30,9 @@ os.environ["SMS_PROVIDER"] = "console"
 os.environ["GITHUB_TOKEN"] = ""
 os.environ["DEMO_LOGIN"] = "true"
 os.environ["UPLOAD_DIR"] = str(ROOT / ".pytest_cache" / "uploads")
+# Tests create their own admins (admin_client); no first admin from .env.
+os.environ["ADMIN_EMAIL"] = ""
+os.environ["ADMIN_PASSWORD"] = ""
 
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import text  # noqa: E402
@@ -38,6 +41,7 @@ from app import models  # noqa: E402,F401
 from app.db import Base, SessionLocal, engine  # noqa: E402
 from app.main import app  # noqa: E402
 from app.seed import TABLES, seed  # noqa: E402
+from app.services.admin import create_admin, reset_lockouts  # noqa: E402
 
 assert "_test" in str(engine.url.database), "tests must not run against the development database"
 
@@ -65,9 +69,10 @@ def schema():
 @pytest.fixture(autouse=True)
 def demo_data(schema):
     with SessionLocal() as db:
-        db.execute(text(f"TRUNCATE {TABLES} CASCADE"))
+        db.execute(text(f"TRUNCATE {TABLES}, admin_users, banned_phones, audit_log CASCADE"))
         db.commit()
         seed(db)
+    reset_lockouts()
     yield
 
 
@@ -86,6 +91,30 @@ def as_user():
         c = TestClient(app)
         clients.append(c)
         response = c.post(f"/api/auth/demo-login/{user_id}")
+        assert response.status_code == 200, response.text
+        return c
+
+    yield make
+    for c in clients:
+        c.close()
+
+
+ADMIN_PASSWORD = "admin-password-1"
+
+
+@pytest.fixture
+def admin_client():
+    """admin_client() -> a client signed in to the admin portal (role "admin" or "viewer")."""
+    clients: list[TestClient] = []
+
+    def make(role: str = "admin", email: str | None = None) -> TestClient:
+        email = email or f"{role}{len(clients)}@example.com"
+        with SessionLocal() as db:
+            create_admin(db, email, role.title(), ADMIN_PASSWORD, role)
+            db.commit()
+        c = TestClient(app)
+        clients.append(c)
+        response = c.post("/api/admin/auth/login", json={"email": email, "password": ADMIN_PASSWORD})
         assert response.status_code == 200, response.text
         return c
 

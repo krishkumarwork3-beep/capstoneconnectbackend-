@@ -19,6 +19,7 @@ from sqlalchemy import (
     Text,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -62,6 +63,9 @@ class User(Base):
     outcome_updates: Mapped[int] = mapped_column(Integer, default=0)
     last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = _now_column()
+    # Suspended by an admin: cannot sign in, and existing sessions stop working.
+    banned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ban_reason: Mapped[str | None] = mapped_column(Text)
 
     membership: Mapped["GroupMember | None"] = relationship(back_populates="user", uselist=False, lazy="joined")
 
@@ -206,4 +210,54 @@ class PasswordResetCode(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = _now_column()
+
+
+# ---------------------------------------------------------------------------------------------
+# Admin portal
+# ---------------------------------------------------------------------------------------------
+
+
+class AdminUser(Base):
+    """Someone who runs the site (the admin portal). Separate from students: own login, own cookie."""
+
+    __tablename__ = "admin_users"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    email: Mapped[str] = mapped_column(String(200), unique=True)
+    name: Mapped[str] = mapped_column(String(120))
+    password_hash: Mapped[str] = mapped_column(String(100))
+    # "admin" can change anything; "viewer" can only look.
+    role: Mapped[str] = mapped_column(String(10), default="admin")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = _now_column()
+
+
+class BannedPhone(Base):
+    """A phone number that may not sign up, sign in or reset a password."""
+
+    __tablename__ = "banned_phones"
+
+    phone_normalized: Mapped[str] = mapped_column(String(20), primary_key=True)
+    phone: Mapped[str] = mapped_column(String(32))
+    reason: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[str | None] = mapped_column(String(200))
+    created_at: Mapped[datetime] = _now_column()
+
+
+class AuditLog(Base):
+    """Every change made through the admin portal: who, what, to which record, when."""
+
+    __tablename__ = "audit_log"
+    __table_args__ = (Index("ix_audit_created", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    admin_id: Mapped[str | None] = mapped_column(String(40))
+    admin_email: Mapped[str] = mapped_column(String(200))
+    action: Mapped[str] = mapped_column(String(60))
+    target_type: Mapped[str | None] = mapped_column(String(30))
+    target_id: Mapped[str | None] = mapped_column(String(60))
+    summary: Mapped[str] = mapped_column(Text, default="")
+    detail: Mapped[dict | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = _now_column()

@@ -53,6 +53,15 @@ class Settings(BaseSettings):
     # Never enable in production.
     demo_login: bool = False
 
+    # Admin portal (../adminportal). Its own session cookie, separate from students'.
+    admin_cookie_name: str = "cc_admin"
+    admin_session_hours: int = 12
+    # First admin, created at startup if no admin has this email yet (later admins are added in
+    # the portal, or with `uv run python -m app.admin_cli create`). Leave empty to skip.
+    admin_email: str = ""
+    admin_password: str = ""
+    admin_name: str = "Site admin"
+
 
 @lru_cache
 def get_settings() -> Settings:

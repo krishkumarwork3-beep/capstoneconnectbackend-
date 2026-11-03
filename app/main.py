@@ -10,9 +10,10 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from app import realtime
+from app.services.admin import ensure_first_admin
 from app.config import get_settings
 from app.errors import install_error_handlers
-from app.routers import auth, chat, groups, requests, system, users
+from app.routers import admin, auth, chat, groups, requests, system, users
 from app.routers import realtime as realtime_router
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -24,6 +25,8 @@ settings = get_settings()
 async def lifespan(_: FastAPI):
     # The thread that LISTENs for events from every worker (see app.realtime).
     await run_in_threadpool(realtime.start)
+    # The first admin from ADMIN_EMAIL / ADMIN_PASSWORD, if set and not created yet.
+    await run_in_threadpool(ensure_first_admin)
     yield
     await run_in_threadpool(realtime.stop)
 
@@ -40,7 +43,7 @@ app.add_middleware(
 )
 install_error_handlers(app)
 
-for router in (auth.router, users.router, groups.router, requests.router, chat.router, system.router, realtime_router.router):
+for router in (auth.router, users.router, groups.router, requests.router, chat.router, system.router, realtime_router.router, admin.router):
     app.include_router(router, prefix=settings.api_prefix)
 
 settings.upload_dir.mkdir(parents=True, exist_ok=True)

@@ -86,7 +86,8 @@ def _settle_full_group(db: Session, group: Group) -> None:
     _close_recommendations(db, group_id=group.id)
 
 
-def _cancel_group_items(db: Session, group_id: str) -> None:
+def cancel_group_items(db: Session, group_id: str) -> None:
+    """The group is closing: its pending requests are cancelled and its recommendations closed."""
     for req in _pending_for_group(db, group_id):
         req.status = "cancelled"
     _close_recommendations(db, group_id=group_id)
@@ -157,7 +158,7 @@ def update_group(db: Session, group: Group, actor: User, changes: dict) -> Group
 def delete_group(db: Session, group: Group, actor: User) -> None:
     if not is_lead(group, actor.id):
         raise AppError("Only the Group Lead can delete the group", 403)
-    _cancel_group_items(db, group.id)
+    cancel_group_items(db, group.id)
     chat.conversations_changed(db, (m.user_id for m in group.members))
     db.delete(group)  # members and the group chat go with it
 
@@ -170,7 +171,7 @@ def leave_group(db: Session, group: Group, user: User) -> Group | None:
     db.flush()
 
     if not group.members:
-        _cancel_group_items(db, group.id)
+        cancel_group_items(db, group.id)
         chat.conversations_changed(db, [user.id])
         db.delete(group)
         return None

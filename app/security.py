@@ -82,6 +82,11 @@ def create_reset_token(user_id: str, password_hash: str) -> str:
     return _encode({"kind": "reset", "sub": user_id, "pv": _fingerprint(password_hash)}, timedelta(minutes=minutes))
 
 
+def create_admin_token(admin_id: str, password_hash: str) -> str:
+    hours = get_settings().admin_session_hours
+    return _encode({"kind": "admin", "sub": admin_id, "pv": _fingerprint(password_hash)}, timedelta(hours=hours))
+
+
 def read_token(token: str, kind: str) -> tuple[str, str] | None:
     """(user id, password fingerprint) from a valid token of this kind, else None."""
     claims = _decode(token, kind)
