@@ -46,11 +46,13 @@ uv run uvicorn app.main:app --reload --port 8000
 uv run pytest
 ```
 
-44 tests against a real PostgreSQL database named `capstoneconnect_test` (from `TEST_DATABASE_URL`,
+64 tests against a real PostgreSQL database named `capstoneconnect_test` (from `TEST_DATABASE_URL`,
 or `DATABASE_URL` with the database renamed). They never touch the development database. They
 cover sign-up and sessions, the whole password-reset flow, every group/request/recommendation rule,
 search and sorting, profile edits, GitHub verification, upload checks, chat visibility and the
-live socket (messages, receipts, typing, presence, sign-in and origin checks).
+live socket (messages, receipts, typing, presence, sign-in and origin checks), and the admin API
+(access and read-only admins, lock-out, students, suspensions and blocked numbers enforced on the
+student side, groups, chat moderation, admin accounts, audit log).
 GitHub is mocked in the tests.
 
 ## Frontend
@@ -114,6 +116,33 @@ socket with an `Origin` not in `CORS_ORIGINS` is refused (close code 4403); a mi
 session closes with 4401. Behind a reverse proxy, pass WebSocket upgrades for `/api/ws` through
 (nginx: `proxy_http_version 1.1` and the `Upgrade`/`Connection` headers).
 
+## Admin portal and admin API
+
+The admin portal (`../adminportal`, port 3100) runs on `/api/admin` (see its README for every page).
+
+- **Admins** are their own accounts (`admin_users`), signed in by email and password with their own
+  cookie (`ADMIN_COOKIE_NAME`, `cc_admin`). Roles: `admin` (can change anything) and `viewer`
+  (read-only, enforced by the API). Five wrong passwords lock an email out for two minutes.
+- **First admin:** `ADMIN_EMAIL` / `ADMIN_PASSWORD` in `.env`, created at startup if missing; or
+  `uv run python -m app.admin_cli create you@example.com "Your Name"` (also `password` and `list`).
+- **Suspended accounts** (`users.banned_at`) and **blocked numbers** (`banned_phones`) are enforced
+  on the student side: sign-up and sign-in, every authenticated request (403), password reset (no
+  code is sent) and the live socket (closed with 4401).
+- **Audit log:** every change made through the admin API is written to `audit_log`.
+
+| Area | Endpoints (under `/api/admin`) |
+| --- | --- |
+| Sign-in | `POST /auth/login` `POST /auth/logout` `GET /auth/me` `POST /auth/password` |
+| Dashboard | `GET /stats` |
+| Students | `GET /users` (q, status, college, sort, page, page_size) `GET /users/colleges` `GET /users/export.csv` `POST /users` `GET/PATCH/DELETE /users/{id}` `POST /users/{id}/password` `POST /users/{id}/ban` `POST /users/{id}/unban` `POST /users/bulk` |
+| Blocked numbers | `GET/POST /banned-phones` `DELETE /banned-phones/{phone}` |
+| Groups and requests | `GET /groups` `GET/DELETE /groups/{id}` `DELETE /groups/{id}/members/{userId}` `GET /requests` `POST /requests/{id}/cancel` |
+| Chat | `GET /conversations` `GET /conversations/{id}/messages` `DELETE /messages/{id}` |
+| Admins and audit | `GET/POST /admins` `PATCH/DELETE /admins/{id}` `GET /audit` |
+
+Every endpoint is in the interactive docs (`/docs`) under the "admin:" sections; signed in to the
+portal on the same host, they can be tried there directly.
+
 ## API
 
 All under `/api`. Errors are `{"message": "…"}`; rule errors use the same wording as the UI
@@ -135,7 +164,7 @@ All under `/api`. Errors are `{"message": "…"}`; rule errors use the same word
 `users` · `groups` · `group_members` (unique `user_id`: one group per student) · `join_requests`
 (join requests and invitations, with the group's name kept for history) · `recommendations` ·
 `conversations` + `conversation_participants` (per-user unread counts and read/delivered times) · `messages` ·
-`password_reset_codes`. Migrations in `alembic/versions/`.
+`password_reset_codes` · `admin_users` · `banned_phones` · `audit_log`. Migrations in `alembic/versions/`.
 
 Seat-changing operations lock the group row (`SELECT … FOR UPDATE`), so two simultaneous accepts
 can't overfill a group.
@@ -143,6 +172,8 @@ can't overfill a group.
 ## Production checklist
 
 - A long random `SECRET_KEY`, `COOKIE_SECURE=true` (HTTPS), `DEMO_LOGIN=false`
+- A strong `ADMIN_PASSWORD` (or create admins with `app.admin_cli` and leave it empty); the admin
+  portal's origin in `CORS_ORIGINS`, on the same site as the API
 - `CORS_ORIGINS` = the site's origin; frontend and API on the same site (e.g. `app.example.com` and
   `api.example.com`) so the `SameSite=Lax` cookie is sent
 - `SMS_PROVIDER=twilio` with credentials; a `GITHUB_TOKEN`
