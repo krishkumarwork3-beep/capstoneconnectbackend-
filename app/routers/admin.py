@@ -259,6 +259,13 @@ def list_students(
     return {"items": [ops.student_row(u, blocked) for u in users], "total": total, "page": page, "page_size": page_size}
 
 
+@students.get("/users/ids", response_model=list[str])
+def student_ids(_: CurrentAdmin, db: DB, q: str | None = None, status: StudentStatus = "all", college: str | None = None):
+    """Ids of every student matching the filters (for "select all"), newest first."""
+    stmt = _student_query(q, status, college).with_only_columns(User.id).order_by(User.created_at.desc())
+    return list(db.scalars(stmt.limit(s.BULK_LIMIT)))
+
+
 @students.get("/users/colleges", response_model=list[str])
 def colleges(_: CurrentAdmin, db: DB):
     return list(db.scalars(select(User.college).distinct().order_by(User.college)))
@@ -452,6 +459,23 @@ def block_numbers(payload: s.BannedPhoneIn, admin: AdminWriter, db: DB):
     return result
 
 
+@numbers.post("/banned-phones/bulk-delete", response_model=s.BulkOut)
+def unblock_numbers(payload: s.IdsIn, admin: AdminWriter, db: DB):
+    """Unblocks several numbers (any format) at once."""
+    done, skipped = [], []
+    for phone in dict.fromkeys(payload.ids):
+        row = db.get(BannedPhone, normalize_phone(phone))
+        if row is None:
+            skipped.append(phone)
+            continue
+        done.append(row.phone_normalized)
+        db.delete(row)
+    if done:
+        ops.record(db, admin, "phone.bulk_unblock", f"Unblocked {len(done)} number(s)", "phone", ",".join(done)[:60], {"numbers": done})
+    db.commit()
+    return {"done": len(done), "skipped": skipped}
+
+
 @numbers.delete("/banned-phones/{phone}", status_code=204)
 def unblock_number(phone: str, admin: AdminWriter, db: DB):
     row = db.get(BannedPhone, normalize_phone(phone))
@@ -469,26 +493,58 @@ def unblock_number(phone: str, admin: AdminWriter, db: DB):
 groups_router = APIRouter(tags=["admin: groups"])
 
 
+GroupStatus = Literal["all", "open", "full"]
+
+
 @groups_router.get("/groups", response_model=s.Page[s.GroupRow])
 def list_groups(
     _: CurrentAdmin,
     db: DB,
     q: str | None = None,
-    status: Literal["all", "open", "full"] = "all",
+    status: GroupStatus = "all",
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=200),
 ):
+    groups = _matching_groups(db, q, status)
+    offset, limit = _paged(page, page_size)
+    return {"items": [ops.group_row(g) for g in groups[offset : offset + limit]], "total": len(groups), "page": page, "page_size": page_size}
+
+
+def _matching_groups(db, q: str | None, status: GroupStatus) -> list[Group]:
     stmt = select(Group).order_by(Group.created_at.desc())
     if q:
         like = f"%{q.strip().lower()}%"
         stmt = stmt.where(or_(func.lower(Group.name).like(like), func.lower(Group.domain).like(like), Group.id == q.strip()))
-    groups = [g for g in db.scalars(stmt).unique()]
+    groups = list(db.scalars(stmt).unique())
     if status == "open":
         groups = [g for g in groups if len(g.members) < g.max_members]
     elif status == "full":
         groups = [g for g in groups if len(g.members) >= g.max_members]
-    offset, limit = _paged(page, page_size)
-    return {"items": [ops.group_row(g) for g in groups[offset : offset + limit]], "total": len(groups), "page": page, "page_size": page_size}
+    return groups
+
+
+@groups_router.get("/groups/ids", response_model=list[str])
+def group_ids(_: CurrentAdmin, db: DB, q: str | None = None, status: GroupStatus = "all"):
+    """Ids of every group matching the filters (for "select all")."""
+    return [g.id for g in _matching_groups(db, q, status)[: s.BULK_LIMIT]]
+
+
+@groups_router.post("/groups/bulk-delete", response_model=s.BulkOut)
+def delete_groups(payload: s.IdsIn, admin: AdminWriter, db: DB):
+    """Deletes several groups and their chats; their members become free to join another group."""
+    done, skipped = [], []
+    for group_id in dict.fromkeys(payload.ids):
+        group = db.get(Group, group_id)
+        if group is None:
+            skipped.append(group_id)
+            continue
+        done.append(group.name)
+        ops.delete_group(db, group)
+        db.flush()
+    if done:
+        ops.record(db, admin, "group.bulk_delete", f"Deleted {len(done)} group(s)", "group", None, {"ids": payload.ids, "names": done})
+    db.commit()
+    return {"done": len(done), "skipped": skipped}
 
 
 def _group(db, group_id: str) -> Group:
@@ -557,6 +613,32 @@ def list_requests(
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
+@groups_router.get("/requests/ids", response_model=list[str])
+def pending_request_ids(_: CurrentAdmin, db: DB, type: Literal["all", "join_request", "invitation"] = "all"):
+    """Ids of every pending request (only pending ones can be cancelled), for "select all"."""
+    stmt = select(JoinRequest.id).where(JoinRequest.status == "pending").order_by(JoinRequest.updated_at.desc())
+    if type != "all":
+        stmt = stmt.where(JoinRequest.type == type)
+    return list(db.scalars(stmt.limit(s.BULK_LIMIT)))
+
+
+@groups_router.post("/requests/bulk-cancel", response_model=s.BulkOut)
+def cancel_requests(payload: s.IdsIn, admin: AdminWriter, db: DB):
+    """Cancels several pending requests; ones that are no longer pending are skipped."""
+    done, skipped = 0, []
+    for request_id in dict.fromkeys(payload.ids):
+        req = db.get(JoinRequest, request_id)
+        if req is None or req.status != "pending":
+            skipped.append(request_id)
+            continue
+        req.status = "cancelled"
+        done += 1
+    if done:
+        ops.record(db, admin, "request.bulk_cancel", f"Cancelled {done} request(s)", "request", None, {"ids": payload.ids})
+    db.commit()
+    return {"done": done, "skipped": skipped}
+
+
 @groups_router.post("/requests/{request_id}/cancel", status_code=204)
 def cancel_request(request_id: str, admin: AdminWriter, db: DB):
     req = db.get(JoinRequest, request_id)
@@ -604,6 +686,23 @@ def conversation_messages(conversation_id: str, _: CurrentAdmin, db: DB, limit: 
         raise not_found("Conversation")
     latest = list(db.scalars(select(Message).where(Message.conversation_id == conversation_id).order_by(Message.created_at.desc()).limit(limit)))
     return list(reversed(latest))
+
+
+@chat_router.post("/messages/bulk-delete", response_model=s.BulkOut)
+def delete_messages(payload: s.IdsIn, admin: AdminWriter, db: DB):
+    """Deletes several messages; each conversation's preview updates."""
+    done, skipped = [], []
+    for message_id in dict.fromkeys(payload.ids):
+        message = db.get(Message, message_id)
+        if message is None:
+            skipped.append(message_id)
+            continue
+        done.append({"id": message.id, "conversation_id": message.conversation_id, "by": message.sender_name, "text": message.text[:200]})
+        ops.delete_message(db, message)
+    if done:
+        ops.record(db, admin, "message.bulk_delete", f"Deleted {len(done)} message(s)", "message", None, {"messages": done})
+    db.commit()
+    return {"done": len(done), "skipped": skipped}
 
 
 @chat_router.delete("/messages/{message_id}", status_code=204)

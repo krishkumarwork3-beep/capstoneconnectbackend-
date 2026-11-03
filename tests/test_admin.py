@@ -217,6 +217,58 @@ def test_cancel_a_pending_request(admin_client):
 
 
 # ---------------------------------------------------------------------------------------------
+# Select all and act on the selection
+# ---------------------------------------------------------------------------------------------
+
+
+def test_select_all_ids_follow_the_filters(admin_client):
+    admin = admin_client()
+    total = admin.get("/api/admin/users", params={"status": "looking"}).json()["total"]
+    ids = admin.get("/api/admin/users/ids", params={"status": "looking"}).json()
+    assert len(ids) == total and LOOKING in ids and LEAD not in ids
+    assert len(admin.get("/api/admin/groups/ids").json()) == admin.get("/api/admin/groups").json()["total"]
+    pending = admin.get("/api/admin/requests", params={"status": "pending"}).json()["total"]
+    assert len(admin.get("/api/admin/requests/ids").json()) == pending
+
+
+def test_bulk_delete_groups(admin_client):
+    admin = admin_client()
+    ids = admin.get("/api/admin/groups/ids").json()
+    r = admin.post("/api/admin/groups/bulk-delete", json={"ids": [*ids, "grp_missing"]})
+    assert r.json() == {"done": len(ids), "skipped": ["grp_missing"]}
+    assert admin.get("/api/admin/groups").json()["total"] == 0
+    assert admin.get(f"/api/admin/users/{LEAD}").json()["group_id"] is None
+    assert "group.bulk_delete" in actions(admin)
+
+
+def test_bulk_unblock_cancel_and_delete_messages(admin_client, as_user):
+    admin = admin_client()
+    admin.post("/api/admin/banned-phones", json={"phones": ["+91 90000 11111", "9000022222"]})
+    r = admin.post("/api/admin/banned-phones/bulk-delete", json={"ids": ["919000011111", "+91 90000 22222", "9000099999"]})
+    assert r.json() == {"done": 2, "skipped": ["9000099999"]}
+    assert admin.get("/api/admin/banned-phones").json() == []
+
+    ids = admin.get("/api/admin/requests/ids").json()
+    assert admin.post("/api/admin/requests/bulk-cancel", json={"ids": ids}).json()["done"] == len(ids)
+    assert admin.get("/api/admin/requests/ids").json() == []
+    assert admin.post("/api/admin/requests/bulk-cancel", json={"ids": ids}).json()["skipped"] == ids
+
+    group = next(c for c in admin.get("/api/admin/conversations").json()["items"] if c["type"] == "group")
+    for text in ("spam one", "spam two"):
+        as_user(LEAD).post(f"/api/conversations/{group['id']}/messages", json={"text": text})
+    spam = [m["id"] for m in admin.get(f"/api/admin/conversations/{group['id']}/messages").json() if m["text"].startswith("spam")]
+    assert admin.post("/api/admin/messages/bulk-delete", json={"ids": spam}).json() == {"done": 2, "skipped": []}
+    row = next(c for c in admin.get("/api/admin/conversations").json()["items"] if c["id"] == group["id"])
+    assert not (row["last_message_text"] or "").startswith("spam")
+
+
+def test_viewer_cannot_bulk_change(admin_client):
+    viewer = admin_client("viewer")
+    assert viewer.post("/api/admin/groups/bulk-delete", json={"ids": ["x"]}).status_code == 403
+    assert viewer.post("/api/admin/messages/bulk-delete", json={"ids": ["x"]}).status_code == 403
+
+
+# ---------------------------------------------------------------------------------------------
 # Admin accounts and audit log
 # ---------------------------------------------------------------------------------------------
 

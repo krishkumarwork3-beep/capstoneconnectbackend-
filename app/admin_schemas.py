@@ -140,8 +140,11 @@ class BanIn(BaseModel):
     block_number: bool = False
 
 
+BULK_LIMIT = 5000
+
+
 class BulkIn(BaseModel):
-    ids: list[str] = Field(min_length=1, max_length=500)
+    ids: list[str] = Field(min_length=1, max_length=BULK_LIMIT)
     action: Literal["ban", "unban", "delete"]
     reason: str = Field(default="", max_length=500)
 
@@ -149,6 +152,12 @@ class BulkIn(BaseModel):
 class BulkOut(BaseModel):
     done: int
     skipped: list[str]
+
+
+class IdsIn(BaseModel):
+    """Several records at once (groups, requests, messages; numbers for blocked numbers)."""
+
+    ids: list[str] = Field(min_length=1, max_length=BULK_LIMIT)
 
 
 # --------------------------------------------------------------------------------------------
