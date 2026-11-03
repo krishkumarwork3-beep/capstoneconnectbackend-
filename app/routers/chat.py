@@ -37,9 +37,9 @@ def messages(conversation_id: str, db: DB, user: CurrentUser):
 def send(conversation_id: str, payload: schemas.SendMessageIn, db: DB, user: CurrentUser):
     conv = chat.get_visible(db, conversation_id, user)
     attachment = payload.attachment.model_dump() if payload.attachment else None
-    message = chat.send_message(db, conv, user, payload.text, attachment)
+    message = chat.send_message(db, conv, user, payload.text, attachment, payload.client_id)
     db.commit()
-    return message_out(message)
+    return message_out(message, payload.client_id)
 
 
 @router.post("/conversations/{conversation_id}/read", status_code=204)

@@ -172,6 +172,9 @@ class ConversationParticipant(Base):
     )
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True)
     unread: Mapped[int] = mapped_column(Integer, default=0)
+    # Receipts (the ticks): this participant has received / read every message up to these times.
+    last_delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     conversation: Mapped[Conversation] = relationship(back_populates="participants")
     user: Mapped[User] = relationship(lazy="joined")

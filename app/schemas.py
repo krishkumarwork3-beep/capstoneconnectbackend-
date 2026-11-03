@@ -274,6 +274,8 @@ class ChatMessageOut(Out):
     text: str
     attachment: AttachmentIO | None = None
     created_at: datetime
+    # Echoes the sender's own id for an optimistic message, so its tab can swap it for this one.
+    client_id: str | None = None
 
 
 class ParticipantOut(Out):
@@ -282,6 +284,8 @@ class ParticipantOut(Out):
     college: str
     avatar_url: str | None = None
     last_seen: datetime | None = None
+    last_delivered_at: datetime | None = None
+    last_read_at: datetime | None = None
 
 
 class LastMessageOut(Out):
@@ -306,6 +310,7 @@ class ConversationOut(Out):
 class SendMessageIn(BaseModel):
     text: str = Field(default="", max_length=4000)
     attachment: AttachmentIO | None = None
+    client_id: str | None = Field(default=None, max_length=64)
 
 
 class DirectIn(BaseModel):

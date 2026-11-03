@@ -155,6 +155,10 @@ def seed(db: Session) -> dict[str, int]:
             conv.last_message_sender = last["sender_name"]
             conv.last_message_at = when(last["created_at"])
             conv.updated_at = when(last["created_at"])
+            # Everyone has the history; those with nothing unread have read it.
+            for p in conv.participants:
+                p.last_delivered_at = conv.last_message_at
+                p.last_read_at = conv.last_message_at if not p.unread else None
     db.commit()
     return {
         "users": len(data["users"]),

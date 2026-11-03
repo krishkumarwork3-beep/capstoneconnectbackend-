@@ -2,7 +2,8 @@
 
 FastAPI + PostgreSQL API for [CapstoneConnect](../3dcapconnectfrontend): students, capstone groups,
 join requests and invitations, recommendations, chat, file uploads, password reset by SMS code, and
-real all-time GitHub contributions.
+real all-time GitHub contributions, with **live chat over WebSockets** (WhatsApp-style ticks,
+typing and online status).
 
 The frontend already talks to it: set `NEXT_PUBLIC_USE_MOCK=false` there (see *Frontend* below).
 
@@ -45,10 +46,11 @@ uv run uvicorn app.main:app --reload --port 8000
 uv run pytest
 ```
 
-34 tests against a real PostgreSQL database named `capstoneconnect_test` (from `TEST_DATABASE_URL`,
+44 tests against a real PostgreSQL database named `capstoneconnect_test` (from `TEST_DATABASE_URL`,
 or `DATABASE_URL` with the database renamed). They never touch the development database. They
 cover sign-up and sessions, the whole password-reset flow, every group/request/recommendation rule,
-search and sorting, profile edits, GitHub verification, upload checks and chat visibility.
+search and sorting, profile edits, GitHub verification, upload checks, chat visibility and the
+live socket (messages, receipts, typing, presence, sign-in and origin checks).
 GitHub is mocked in the tests.
 
 ## Frontend
@@ -89,6 +91,29 @@ in the background when a profile is viewed and the cached total is older than
 `GITHUB_REFRESH_HOURS` (24). A client never sets the total: the server looks it up itself.
 The seeded usernames are examples; their totals are demo values until a refresh checks them.
 
+## Live chat (WebSocket)
+
+`ws://localhost:8000/api/ws`, signed in by the same session cookie. Messages are still sent with
+`POST /conversations/{id}/messages` (pass a `client_id` to match the optimistic copy); the socket
+carries everything that happens next, to every open tab of every participant:
+
+| Event | |
+| --- | --- |
+| `message.new` | a new message (the sender's other tabs get it too) |
+| `typing` | someone started or stopped typing (cleared when they disconnect) |
+| `delivered` / `read` | receipts: one tick when stored, two when it reached everyone, blue when everyone read it |
+| `presence` | someone you chat with came online or left (with `last_seen`) |
+| `conversations.changed` | a group chat appeared or went (joined, left, removed, deleted) |
+
+The client sends `ping` (~25 s), `typing`, `delivered` and `read`. Receipts are stored per
+participant (`last_delivered_at`, `last_read_at`), so the ticks are right after a reload too.
+
+Events go through **PostgreSQL `LISTEN/NOTIFY`**, published in the same transaction as the change,
+so they are sent only if it commits and reach a socket on any worker (`--workers 2` works). A
+socket with an `Origin` not in `CORS_ORIGINS` is refused (close code 4403); a missing or ended
+session closes with 4401. Behind a reverse proxy, pass WebSocket upgrades for `/api/ws` through
+(nginx: `proxy_http_version 1.1` and the `Upgrade`/`Connection` headers).
+
 ## API
 
 All under `/api`. Errors are `{"message": "…"}`; rule errors use the same wording as the UI
@@ -102,14 +127,14 @@ All under `/api`. Errors are `{"message": "…"}`; rule errors use the same word
 | Groups | `GET/POST /groups` `GET /groups/mine` `GET/PATCH/DELETE /groups/{id}` `POST /groups/{id}/leave` `DELETE /groups/{id}/members/{memberId}` `POST /groups/{id}/join-requests` |
 | Requests | `GET /requests?direction=sent\|received` `PATCH /requests/{id}` (accepted, declined, withdrawn, cancelled) |
 | Recommendations | `GET/POST /recommendations` `POST /recommendations/{id}/dismiss` `POST /recommendations/{id}/invite` |
-| Chat | `GET /conversations` `POST /conversations/direct` `GET /conversations/{id}` `GET/POST /conversations/{id}/messages` `POST /conversations/{id}/read` `POST /uploads/attachments` |
+| Chat | `WS /ws` `GET /conversations` `POST /conversations/direct` `GET /conversations/{id}` `GET/POST /conversations/{id}/messages` `POST /conversations/{id}/read` `POST /uploads/attachments` |
 | Other | `GET /counts` `POST /counts/outcomes` `POST /presence` `GET /github/verify?username=` `GET /health` |
 
 ## Data model
 
 `users` · `groups` · `group_members` (unique `user_id`: one group per student) · `join_requests`
 (join requests and invitations, with the group's name kept for history) · `recommendations` ·
-`conversations` + `conversation_participants` (per-user unread counts) · `messages` ·
+`conversations` + `conversation_participants` (per-user unread counts and read/delivered times) · `messages` ·
 `password_reset_codes`. Migrations in `alembic/versions/`.
 
 Seat-changing operations lock the group row (`SELECT … FOR UPDATE`), so two simultaneous accepts

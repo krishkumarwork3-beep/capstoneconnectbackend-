@@ -158,6 +158,7 @@ def delete_group(db: Session, group: Group, actor: User) -> None:
     if not is_lead(group, actor.id):
         raise AppError("Only the Group Lead can delete the group", 403)
     _cancel_group_items(db, group.id)
+    chat.conversations_changed(db, (m.user_id for m in group.members))
     db.delete(group)  # members and the group chat go with it
 
 
@@ -170,6 +171,7 @@ def leave_group(db: Session, group: Group, user: User) -> Group | None:
 
     if not group.members:
         _cancel_group_items(db, group.id)
+        chat.conversations_changed(db, [user.id])
         db.delete(group)
         return None
 

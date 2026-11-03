@@ -99,6 +99,7 @@ def _plural_members(count: int) -> str:
 
 def conversation_out(conv: Conversation, viewer_id: str) -> schemas.ConversationOut:
     people = [p.user for p in conv.participants]
+    receipts = {p.user_id: p for p in conv.participants}
     if conv.type == "group" and conv.group is not None:
         title = conv.group.name
         subtitle = _plural_members(len(conv.group.members))
@@ -125,7 +126,15 @@ def conversation_out(conv: Conversation, viewer_id: str) -> schemas.Conversation
         group_id=conv.group_id,
         participant_ids=[u.id for u in people],
         participants=[
-            schemas.ParticipantOut(id=u.id, name=u.name, college=u.college, avatar_url=u.avatar_url, last_seen=u.last_seen)
+            schemas.ParticipantOut(
+                id=u.id,
+                name=u.name,
+                college=u.college,
+                avatar_url=u.avatar_url,
+                last_seen=u.last_seen,
+                last_delivered_at=receipts[u.id].last_delivered_at,
+                last_read_at=receipts[u.id].last_read_at,
+            )
             for u in people
         ],
         last_message=last,
@@ -134,7 +143,7 @@ def conversation_out(conv: Conversation, viewer_id: str) -> schemas.Conversation
     )
 
 
-def message_out(message: Message) -> schemas.ChatMessageOut:
+def message_out(message: Message, client_id: str | None = None) -> schemas.ChatMessageOut:
     attachment = (
         schemas.AttachmentIO(name=message.attachment_name, url=message.attachment_url or "", size=message.attachment_size or 0)
         if message.attachment_name
@@ -148,4 +157,5 @@ def message_out(message: Message) -> schemas.ChatMessageOut:
         text=message.text or "",
         attachment=attachment,
         created_at=message.created_at,
+        client_id=client_id,
     )
