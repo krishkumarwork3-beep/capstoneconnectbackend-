@@ -15,7 +15,7 @@ from app.services.admin import ensure_first_admin
 from app.config import get_settings
 from app.errors import install_error_handlers
 from app.observability import RequestContextMiddleware, trusted_proxies
-from app.routers import admin, auth, chat, files, groups, requests, system, users
+from app.routers import admin, auth, chat, community, files, groups, requests, system, users
 from app.routers import realtime as realtime_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -52,7 +52,7 @@ app.add_middleware(RequestContextMiddleware)
 if trusted_proxies() is not None:
     app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=trusted_proxies())
 
-for router in (auth.router, users.router, groups.router, requests.router, chat.router, system.router, realtime_router.router, admin.router):
+for router in (auth.router, users.router, groups.router, requests.router, chat.router, community.router, system.router, realtime_router.router, admin.router):
     app.include_router(router, prefix=settings.api_prefix)
 
 settings.upload_dir.mkdir(parents=True, exist_ok=True)

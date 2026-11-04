@@ -299,6 +299,88 @@ class MessageRow(Out):
         return public_url(value)
 
 
+class ReportRow(Out):
+    id: str
+    reporter_id: str
+    reporter_name: str
+    target_type: str
+    target_id: str
+    target_user_id: str | None = None
+    target_user_name: str | None = None
+    target_user_banned: bool = False
+    target_exists: bool = True
+    conversation_id: str | None = None
+    reason: str
+    reason_label: str
+    details: str
+    snapshot: str
+    status: str
+    handled_by: str | None = None
+    handled_at: datetime | None = None
+    created_at: datetime
+
+
+class ReportStatusIn(BaseModel):
+    status: Literal["open", "reviewed", "dismissed"]
+
+
+class ReportSuspendIn(BaseModel):
+    reason: str = Field(default="", max_length=500)
+
+
+def _http_link(value: str | None) -> str | None:
+    if value is None or value.strip() == "":
+        return None
+    value = value.strip()
+    if not (value.startswith("https://") or value.startswith("http://") or value.startswith("/")) or value.startswith("//"):
+        raise ValueError("the link must start with https:// (or / for a page on this site)")
+    return value
+
+
+class AnnouncementIn(BaseModel):
+    text: str = Field(min_length=1, max_length=300)
+    link_url: str | None = Field(default=None, max_length=500)
+    link_label: str | None = Field(default=None, max_length=60)
+    level: Literal["info", "warning"] = "info"
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+
+    @field_validator("link_url")
+    @classmethod
+    def _link(cls, value: str | None) -> str | None:
+        return _http_link(value)
+
+
+class AnnouncementPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str | None = Field(default=None, min_length=1, max_length=300)
+    link_url: str | None = Field(default=None, max_length=500)
+    link_label: str | None = Field(default=None, max_length=60)
+    level: Literal["info", "warning"] | None = None
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+
+    @field_validator("link_url")
+    @classmethod
+    def _link(cls, value: str | None) -> str | None:
+        return _http_link(value)
+
+
+class AnnouncementRow(Out):
+    id: str
+    text: str
+    link_url: str | None = None
+    link_label: str | None = None
+    level: str
+    starts_at: datetime
+    ends_at: datetime | None = None
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+    active: bool = False
+
+
 class AuditRow(Out):
     id: str
     admin_email: str

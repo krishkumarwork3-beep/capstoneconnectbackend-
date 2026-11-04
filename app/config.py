@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     # or networks, or "*" when only the proxy can reach the API). Empty: those headers are ignored
     # and the connecting address is the visitor's (the per-IP sign-in limits use it).
     trusted_proxy_ips: str = ""
+    # How many reports one student may send in 24 hours.
+    reports_per_day: int = 10
     # Tests only: /api/health also reports which worker process answered.
     expose_worker_pid: bool = False
 

@@ -66,7 +66,14 @@ def _extra_write_calls(ids) -> dict:
     return {key: value(ids) for key, value in EXTRA_WRITES.items()}
 
 
-EXTRA_WRITES: dict = {}
+EXTRA_WRITES: dict = {
+    ("POST", "/api/admin/reports/{report_id}/status"): lambda ids: (f"/api/admin/reports/{ids['report']}/status", {"status": "dismissed"}),
+    ("POST", "/api/admin/reports/{report_id}/suspend"): lambda ids: (f"/api/admin/reports/{ids['report2']}/suspend", {"reason": "spam"}),
+    ("POST", "/api/admin/reports/{report_id}/delete-message"): lambda ids: (f"/api/admin/reports/{ids['report_message']}/delete-message", None),
+    ("POST", "/api/admin/announcements"): lambda ids: ("/api/admin/announcements", {"text": "Maintenance tonight", "level": "warning"}),
+    ("PATCH", "/api/admin/announcements/{announcement_id}"): lambda ids: (f"/api/admin/announcements/{ids['announcement']}", {"text": "Edited"}),
+    ("DELETE", "/api/admin/announcements/{announcement_id}"): lambda ids: (f"/api/admin/announcements/{ids['announcement']}", None),
+}
 NOT_DATA_WRITES = {("POST", "/api/admin/auth/login"), ("POST", "/api/admin/auth/logout")}
 
 
@@ -116,7 +123,18 @@ def _ids(admin_client, as_user):
         viewer_id = db.scalar(select(AdminUser.id).where(AdminUser.role == "viewer"))
     as_user(OTHER).post(f"/api/users/{OTHER}/avatar", files={"avatar": ("me.png", PNG, "image/png")})
     del viewer
-    return {"request": pending[0], "request2": pending[1], "message": messages[0], "message2": messages[1], "viewer_admin": viewer_id}
+    # Reports and an announcement for the report/announcement write routes.
+    reports = []
+    for target in (LEAD, MEMBER):
+        reports.append(as_user(OTHER).post("/api/reports", json={"target_type": "user", "target_id": target, "reason": "spam"}).json()["id"])
+    member = as_user(MEMBER)
+    member.post(f"/api/conversations/{conv}/messages", json={"text": "reported"})
+    with SessionLocal() as db:
+        reported = db.scalar(select(Message.id).where(Message.text == "reported"))
+    reports.append(as_user(LEAD).post("/api/reports", json={"target_type": "message", "target_id": reported, "reason": "spam"}).json()["id"])
+    ann = admin_client().post("/api/admin/announcements", json={"text": "Hello"}).json()["id"]
+    return {"request": pending[0], "request2": pending[1], "message": messages[0], "message2": messages[1], "viewer_admin": viewer_id,
+            "report": reports[0], "report2": reports[1], "report_message": reports[2], "announcement": ann}
 
 
 def test_every_admin_write_is_audited(admin_client, as_user):

@@ -17,6 +17,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -135,6 +136,59 @@ class JoinRequest(Base):
 
     sender: Mapped[User] = relationship(foreign_keys=[sender_id], lazy="joined")
     receiver: Mapped[User] = relationship(foreign_keys=[receiver_id], lazy="joined")
+
+
+class Report(Base):
+    """A student reporting another student, a group or a chat message to the admins.
+
+    `target_user_id` is the student behind the reported thing (the student, the group's lead, the
+    message's sender), so an admin can suspend them in one click; `snapshot` keeps what was
+    reported (a name, a group name, the message text) even if it is later edited or deleted.
+    """
+
+    __tablename__ = "reports"
+    __table_args__ = (
+        UniqueConstraint("reporter_id", "target_type", "target_id", name="uq_report_once"),
+        Index("ix_reports_status_created", "status", "created_at"),
+        Index("ix_reports_reporter_created", "reporter_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    reporter_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    target_type: Mapped[str] = mapped_column(String(10))  # user | group | message
+    target_id: Mapped[str] = mapped_column(String(40))
+    target_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    conversation_id: Mapped[str | None] = mapped_column(String(40))
+    reason: Mapped[str] = mapped_column(String(20))
+    details: Mapped[str] = mapped_column(Text, default="")
+    snapshot: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(12), default="open")  # open | reviewed | dismissed | actioned
+    handled_by: Mapped[str | None] = mapped_column(String(200))
+    handled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = _now_column()
+    updated_at: Mapped[datetime] = _now_column(onupdate=utcnow)
+
+    reporter: Mapped[User] = relationship(foreign_keys=[reporter_id], lazy="joined")
+    target_user: Mapped[User | None] = relationship(foreign_keys=[target_user_id], lazy="joined")
+
+
+class Announcement(Base):
+    """A site-wide banner: shown to every visitor between `starts_at` and `ends_at` (open-ended
+    when empty)."""
+
+    __tablename__ = "announcements"
+    __table_args__ = (Index("ix_announcements_window", "starts_at", "ends_at"),)
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    text: Mapped[str] = mapped_column(String(300))
+    link_url: Mapped[str | None] = mapped_column(String(500))
+    link_label: Mapped[str | None] = mapped_column(String(60))
+    level: Mapped[str] = mapped_column(String(10), default="info")  # info | warning
+    starts_at: Mapped[datetime] = _now_column()
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = _now_column()
+    updated_at: Mapped[datetime] = _now_column(onupdate=utcnow)
 
 
 class RateLimit(Base):

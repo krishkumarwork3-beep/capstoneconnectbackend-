@@ -29,8 +29,10 @@ from app.models import (
     Group,
     GroupMember,
     JoinRequest,
+    Announcement,
     Message,
     Recommendation,
+    Report,
     User,
     utcnow,
 )
@@ -179,6 +181,7 @@ def stats(_: CurrentAdmin, db: DB):
             "messages_today": count(Message, Message.created_at >= day_ago),
         },
         "blocked_numbers": count(BannedPhone),
+        "reports": {"open": count(Report, Report.status == "open")},
         "signups": signups,
         "recent_users": [
             {"id": u.id, "name": u.name, "college": u.college, "created_at": u.created_at}
@@ -812,5 +815,166 @@ def audit_log(
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
-for part in (auth, admins, dashboard, students, numbers, groups_router, chat_router, audit):
+# =============================================================================================
+# Reports (from students) and announcements (the site banner)
+# =============================================================================================
+
+community = APIRouter(tags=["admin: reports and announcements"])
+
+
+def _report_row(db, r: Report) -> s.ReportRow:
+    from app.routers.community import REASONS
+
+    exists = {
+        "user": lambda: db.get(User, r.target_id) is not None,
+        "group": lambda: db.get(Group, r.target_id) is not None,
+        "message": lambda: db.get(Message, r.target_id) is not None,
+    }[r.target_type]()
+    return s.ReportRow(
+        id=r.id, reporter_id=r.reporter_id, reporter_name=r.reporter.name, target_type=r.target_type,
+        target_id=r.target_id, target_user_id=r.target_user_id,
+        target_user_name=r.target_user.name if r.target_user else None,
+        target_user_banned=bool(r.target_user and r.target_user.banned_at), target_exists=exists,
+        conversation_id=r.conversation_id, reason=r.reason, reason_label=REASONS.get(r.reason, r.reason),
+        details=r.details or "", snapshot=r.snapshot or "", status=r.status, handled_by=r.handled_by,
+        handled_at=r.handled_at, created_at=r.created_at,
+    )
+
+
+def _report(db, report_id: str) -> Report:
+    report = db.get(Report, report_id)
+    if report is None:
+        raise not_found("Report")
+    return report
+
+
+def _handled(report: Report, admin, status: str) -> None:
+    report.status = status
+    report.handled_by = admin.email
+    report.handled_at = utcnow()
+
+
+@community.get("/reports", response_model=s.Page[s.ReportRow])
+def list_reports(
+    _: CurrentAdmin,
+    db: DB,
+    status: Literal["all", "open", "reviewed", "dismissed", "actioned"] = "open",
+    target_type: Literal["all", "user", "group", "message"] = "all",
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=200),
+):
+    stmt = select(Report)
+    if status != "all":
+        stmt = stmt.where(Report.status == status)
+    if target_type != "all":
+        stmt = stmt.where(Report.target_type == target_type)
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    offset, limit = _paged(page, page_size)
+    rows = list(db.scalars(stmt.order_by(Report.created_at.desc()).offset(offset).limit(limit)).unique())
+    return {"items": [_report_row(db, r) for r in rows], "total": total, "page": page, "page_size": page_size}
+
+
+@community.post("/reports/{report_id}/status", response_model=s.ReportRow)
+def set_report_status(report_id: str, payload: s.ReportStatusIn, admin: AdminWriter, db: DB):
+    """Mark reviewed, dismiss, or reopen."""
+    report = _report(db, report_id)
+    if payload.status == "open":
+        report.status, report.handled_by, report.handled_at = "open", None, None
+    else:
+        _handled(report, admin, payload.status)
+    ops.record(db, admin, f"report.{payload.status}", f"Marked a report on {report.snapshot[:60]} as {payload.status}", "report", report.id)
+    db.commit()
+    return _report_row(db, report)
+
+
+@community.post("/reports/{report_id}/suspend", response_model=s.ReportRow)
+def suspend_from_report(report_id: str, payload: s.ReportSuspendIn, admin: AdminWriter, db: DB):
+    """Suspends the student behind the report (they are signed out at once)."""
+    report = _report(db, report_id)
+    user = db.get(User, report.target_user_id) if report.target_user_id else None
+    if user is None:
+        raise AppError("There is no student to suspend for this report", 409)
+    reason = payload.reason.strip() or f"Report: {report.reason}"
+    ops.ban(db, user, reason)
+    _handled(report, admin, "actioned")
+    ops.record(db, admin, "report.suspend", f"Suspended {user.name} after a report", "user", user.id,
+               {"report_id": report.id, "reason": reason})
+    db.commit()
+    return _report_row(db, report)
+
+
+@community.post("/reports/{report_id}/delete-message", response_model=s.ReportRow)
+def delete_reported_message(report_id: str, admin: AdminWriter, db: DB):
+    report = _report(db, report_id)
+    if report.target_type != "message":
+        raise AppError("This report is not about a message", 409)
+    message = db.get(Message, report.target_id)
+    if message is None:
+        raise AppError("That message was already deleted", 409)
+    ops.record(db, admin, "report.delete_message", f"Deleted a reported message by {message.sender_name}", "message",
+               message.id, {"report_id": report.id, "text": (message.text or "")[:500]})
+    ops.delete_message(db, message)
+    _handled(report, admin, "actioned")
+    db.commit()
+    return _report_row(db, report)
+
+
+def _announcement_row(a: Announcement) -> s.AnnouncementRow:
+    now = utcnow()
+    return s.AnnouncementRow.model_validate(a).model_copy(update={"active": a.starts_at <= now and (a.ends_at is None or a.ends_at > now)})
+
+
+def _check_window(starts_at, ends_at) -> None:
+    if ends_at is not None and starts_at is not None and ends_at <= starts_at:
+        raise AppError("The end must be after the start", 422)
+
+
+@community.get("/announcements", response_model=list[s.AnnouncementRow])
+def list_announcements(_: CurrentAdmin, db: DB):
+    return [_announcement_row(a) for a in db.scalars(select(Announcement).order_by(Announcement.starts_at.desc()).limit(200))]
+
+
+@community.post("/announcements", response_model=s.AnnouncementRow, status_code=201)
+def create_announcement(payload: s.AnnouncementIn, admin: AdminWriter, db: DB):
+    starts = payload.starts_at or utcnow()
+    _check_window(starts, payload.ends_at)
+    a = Announcement(id=new_id("ann"), text=payload.text.strip(), link_url=payload.link_url,
+                     link_label=(payload.link_label or "").strip() or None, level=payload.level,
+                     starts_at=starts, ends_at=payload.ends_at, created_by=admin.email)
+    db.add(a)
+    ops.record(db, admin, "announcement.create", f"Posted an announcement: {a.text[:60]}", "announcement", a.id)
+    db.commit()
+    return _announcement_row(a)
+
+
+@community.patch("/announcements/{announcement_id}", response_model=s.AnnouncementRow)
+def update_announcement(announcement_id: str, payload: s.AnnouncementPatch, admin: AdminWriter, db: DB):
+    a = db.get(Announcement, announcement_id)
+    if a is None:
+        raise not_found("Announcement")
+    changes = payload.model_dump(exclude_unset=True)
+    for key, value in changes.items():
+        if key in ("text", "link_label") and isinstance(value, str):
+            value = value.strip() or (None if key == "link_label" else value)
+        setattr(a, key, value)
+    if a.starts_at is None:
+        a.starts_at = utcnow()
+    _check_window(a.starts_at, a.ends_at)
+    ops.record(db, admin, "announcement.edit", f"Edited an announcement: {a.text[:60]}", "announcement", a.id,
+               {"fields": sorted(changes)})
+    db.commit()
+    return _announcement_row(a)
+
+
+@community.delete("/announcements/{announcement_id}", status_code=204)
+def delete_announcement(announcement_id: str, admin: AdminWriter, db: DB):
+    a = db.get(Announcement, announcement_id)
+    if a is None:
+        raise not_found("Announcement")
+    ops.record(db, admin, "announcement.delete", f"Deleted an announcement: {a.text[:60]}", "announcement", a.id)
+    db.delete(a)
+    db.commit()
+
+
+for part in (auth, admins, dashboard, students, numbers, groups_router, chat_router, community, audit):
     router.include_router(part)
