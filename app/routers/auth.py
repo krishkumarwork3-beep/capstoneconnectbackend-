@@ -16,14 +16,14 @@ from app.errors import AppError
 from app.models import User, utcnow
 from app.passwords import ensure_good_password
 from app.security import create_session_token, hash_password, new_id, normalize_phone, verify_password
-
-# Checked against when the number has no account, so a wrong number takes as long as a wrong
-# password and timing does not tell which numbers are registered.
-_DUMMY_HASH = hash_password("not-a-real-password-for-timing")
 from app.serializers import user_out
 from app.services import bans, github, limits, password_reset
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# Checked against when the number has no account, so a wrong number takes as long as a wrong
+# password and timing does not tell which numbers are registered.
+_DUMMY_HASH = hash_password("not-a-real-password-for-timing")
 
 
 def _start_session(response: Response, user: User) -> None:

@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: capstoneconnect
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/capstoneconnect
+      TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/capstoneconnect_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.6"
+      - run: uv sync --frozen
+      - name: Create the test database
+        run: PGPASSWORD=postgres psql -h localhost -U postgres -c "CREATE DATABASE capstoneconnect_test"
+      - name: Migrations apply, and match the models
+        run: |
+          uv run alembic upgrade head
+          uv run alembic check
+      - name: Tests
+        run: uv run pytest -q
+      - name: Unsafe-settings check works (exits 1 on this CI's development settings)
+        run: "! uv run python -m app.check_config"
+      - name: The image builds
+        run: docker build -t capstoneconnect-api .

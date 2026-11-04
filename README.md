@@ -46,15 +46,28 @@ uv run uvicorn app.main:app --reload --port 8000
 uv run pytest
 ```
 
-90 tests against a real PostgreSQL database named `capstoneconnect_test` (from `TEST_DATABASE_URL`,
-or `DATABASE_URL` with the database renamed). They never touch the development database. They
-cover sign-up and sessions, the whole password-reset flow, every group/request/recommendation rule,
-search and sorting, profile edits, GitHub verification, upload checks, chat visibility and the
-live socket (messages, receipts, typing, presence, sign-in and origin checks), and the admin API
-(access and read-only admins, lock-out, students, suspensions and blocked numbers enforced on the
-student side, groups, chat moderation, admin accounts, audit log), throttling, phone-number privacy,
-private uploads (including path traversal and renamed executables) and unsafe-settings checks.
-GitHub is mocked in the tests.
+147 tests against a real PostgreSQL database named `capstoneconnect_test` (from `TEST_DATABASE_URL`,
+or `DATABASE_URL` with the database renamed). They never touch the development database. Beyond
+the product rules (sign-up and sessions, password reset, groups, requests, recommendations, search,
+profiles, GitHub, uploads, chat and the live socket, the admin API, reports, announcements) they
+cover the security and production behaviour:
+
+- every admin route walked automatically (needs an admin; read-only admins can't write; every
+  write is audited), and an IDOR sweep of the student API;
+- password rules, no account enumeration (login timing, reset answers), throttling, phone privacy,
+  private files (local disk and S3 via moto), old links, the upload-path migration on a fresh DB;
+- real uvicorn processes: two workers sharing the limits, `--proxy-headers` trusted only from the
+  configured proxy, the API refusing to start with unsafe settings, `check_config` exit codes;
+- cookie layouts, request ids and logs (no secrets), clean 500s, health with the database down,
+  security headers, Twilio misconfiguration, backup then restore into a fresh database, and the
+  env examples staying complete.
+
+GitHub and S3 are mocked; no test calls an outside service.
+
+`.github/workflows/ci.yml` runs migrations, `alembic check`, the tests and a Docker build on
+every push. A load test (Locust) is in `loadtest/`; 50 users for a minute on a laptop (2 workers):
+0 errors in 2,285 requests, p95 34 ms (student list), 27 ms (read chat), 47 ms (send message),
+410 ms (sign-in; bcrypt is deliberately slow).
 
 ## Frontend
 
@@ -111,6 +124,31 @@ run uvicorn with `--proxy-headers` so the visitor's address is used. Every limit
   admins). A message can only attach a file just uploaded to this server, and a file can't be
   re-sent to another conversation. Types are checked by content and sizes are capped
   (avatar 2 MB PNG/JPG, résumé 5 MB PDF, attachment 5 MB PDF/PNG/JPG/DOCX/ZIP).
+
+## Reports and announcements
+
+- `POST /reports {target_type: user|group|message, target_id, reason, details}`: a student reports
+  another student, a group (not their own) or a message in a conversation they're in. Once per
+  thing, `REPORTS_PER_DAY` (10) a day, never themselves. The report keeps a copy of what was
+  reported. Admins review them in the portal (`/admin/reports`: mark reviewed, dismiss, reopen,
+  suspend the student, delete the message), all audited.
+- `GET /announcements` (public): the site banners showing now; admins post them with
+  `/admin/announcements` (text, optional link, info or warning, start and end time).
+
+## Storage, cookies, proxies, logs
+
+- **Files**: `STORAGE_BACKEND=local` (UPLOAD_DIR) or `s3` (any S3-compatible bucket). Either way
+  the API serves them with the access rules; the database keeps paths like `/uploads/resume/…`
+  and answers full links built from `PUBLIC_BASE_URL`, so a domain change keeps links working.
+  `scripts/migrate_uploads.py` copies local files to a bucket.
+- **Cookies**: `COOKIE_SAMESITE` (lax/strict/none), `COOKIE_DOMAIN`, `COOKIE_SECURE`; which
+  combination fits which layout is in `app/cookies.py` and `DEPLOY.md`.
+- **Proxies**: run uvicorn with `--proxy-headers --forwarded-allow-ips <proxy IP>` (the Docker image
+  does), or set `TRUSTED_PROXY_IPS`; X-Forwarded-For from anyone else is ignored.
+- **Logs**: one JSON line per request with a request id (`X-Request-ID`), never bodies, so no
+  passwords, codes or tokens; unexpected errors answer `{"message", "request_id"}`, no traceback.
+- **Health**: `GET /api/health` is 200 when the database answers, 503 when it doesn't.
+- **Backups**: `scripts/db_backup.py backup|restore` (pg_dump/pg_restore).
 
 ## Unsafe settings
 
@@ -215,17 +253,7 @@ All under `/api`. Errors are `{"message": "…"}`; rule errors use the same word
 Seat-changing operations lock the group row (`SELECT … FOR UPDATE`), so two simultaneous accepts
 can't overfill a group.
 
-## Production checklist
+## Deploying
 
-- A long random `SECRET_KEY`, `COOKIE_SECURE=true` (HTTPS), `DEMO_LOGIN=false`, `ALLOW_DEV_CODE=false`;
-  `uv run python -m app.check_config` must report nothing
-- A strong `ADMIN_PASSWORD` (or create admins with `app.admin_cli` and leave it empty); the admin
-  portal's origin in `CORS_ORIGINS`, on the same site as the API
-- `CORS_ORIGINS` = the site's origin; frontend and API on the same site (e.g. `app.example.com` and
-  `api.example.com`) so the `SameSite=Lax` cookie is sent
-- `SMS_PROVIDER=twilio` with credentials; a `GITHUB_TOKEN`
-- `UPLOAD_DIR` on persistent storage and `PUBLIC_BASE_URL` set to the API's public URL
-- Run `uv run alembic upgrade head` on deploy; serve with
-  `uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2 --proxy-headers --forwarded-allow-ips=<proxy IP>`
-  behind a reverse proxy that sets `X-Forwarded-For`. Without `--proxy-headers` every visitor
-  appears to come from the proxy, so they would all share one per-IP sign-in limit.
+See [DEPLOY.md](DEPLOY.md): layouts and cookie settings, the Docker image, every variable
+(`.env.production.example`), the first admin, backups, key rotation and a smoke-test checklist.

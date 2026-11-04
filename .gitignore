@@ -12,6 +12,9 @@ wheels/
 
 # Local settings and data
 .env
+.env.*
+!.env.example
+!.env.production.example
 .pgdata/
 .pgdata-test/
 uploads/*

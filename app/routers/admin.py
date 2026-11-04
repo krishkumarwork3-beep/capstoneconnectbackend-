@@ -25,7 +25,6 @@ from app.models import (
     AuditLog,
     BannedPhone,
     Conversation,
-    ConversationParticipant,
     Group,
     GroupMember,
     JoinRequest,
