@@ -87,6 +87,10 @@ class Connection:
         while True:
             event = await self.queue.get()
             await self.ws.send_text(_dumps(event))
+            if event.get("type") == "session.ended":
+                # Suspended, blocked, password reset or deleted: this socket is done.
+                await self.ws.close(code=4401, reason="Your session ended")
+                return
 
 
 class Hub:

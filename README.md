@@ -169,7 +169,9 @@ The admin portal (`../adminportal`, port 3100) runs on `/api/admin` (see its REA
   `uv run python -m app.admin_cli create you@example.com "Your Name"` (also `password` and `list`).
 - **Suspended accounts** (`users.banned_at`) and **blocked numbers** (`banned_phones`) are enforced
   on the student side: sign-up and sign-in, every authenticated request (403), password reset (no
-  code is sent) and the live socket (closed with 4401).
+  code is sent) and the live socket (closed with 4401). Suspending, blocking, setting a new
+  password or deleting a student also pushes `session.ended` to their open tabs, which sign out
+  at once.
 - **Audit log:** every change made through the admin API is written to `audit_log`.
 
 | Area | Endpoints (under `/api/admin`) |
@@ -224,4 +226,6 @@ can't overfill a group.
 - `SMS_PROVIDER=twilio` with credentials; a `GITHUB_TOKEN`
 - `UPLOAD_DIR` on persistent storage and `PUBLIC_BASE_URL` set to the API's public URL
 - Run `uv run alembic upgrade head` on deploy; serve with
-  `uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2` behind a reverse proxy
+  `uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2 --proxy-headers --forwarded-allow-ips=<proxy IP>`
+  behind a reverse proxy that sets `X-Forwarded-For`. Without `--proxy-headers` every visitor
+  appears to come from the proxy, so they would all share one per-IP sign-in limit.

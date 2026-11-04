@@ -8,7 +8,7 @@ from starlette.websockets import WebSocketDisconnect
 from app.main import app
 from tests.conftest import ADMIN_PASSWORD, PASSWORD, PHONES
 
-LEAD, MEMBER, LOOKING = "usr_1", "usr_9", "usr_6"
+LEAD, MEMBER, LOOKING, OTHER_LOOKING = "usr_1", "usr_9", "usr_6", "usr_8"
 
 
 def login(phone: str, password: str = PASSWORD) -> tuple[TestClient, int]:
@@ -118,6 +118,61 @@ def test_suspended_student_socket_is_refused(admin_client, as_user):
         with pytest.raises(WebSocketDisconnect) as closed:
             ws.receive_json()
     assert closed.value.code == 4401
+
+
+@pytest.mark.parametrize("action", ["ban", "block", "password", "delete"])
+def test_admin_actions_sign_open_tabs_out_at_once(admin_client, as_user, action):
+    student, admin = as_user(OTHER_LOOKING), admin_client()
+    with student.websocket_connect("/api/ws") as ws:
+        assert ws.receive_json()["type"] == "hello"
+        if action == "ban":
+            admin.post(f"/api/admin/users/{OTHER_LOOKING}/ban", json={"reason": "spam"})
+        elif action == "block":
+            admin.post("/api/admin/banned-phones", json={"phones": [PHONES[OTHER_LOOKING]]})
+        elif action == "password":
+            admin.post(f"/api/admin/users/{OTHER_LOOKING}/password", json={"password": "a-new-password-1"})
+        else:
+            admin.delete(f"/api/admin/users/{OTHER_LOOKING}")
+        event = ws.receive_json()
+        while event["type"] != "session.ended":
+            event = ws.receive_json()
+        with pytest.raises(WebSocketDisconnect) as closed:
+            ws.receive_json()
+    assert closed.value.code == 4401
+    assert student.get("/api/auth/me").status_code in (401, 403)
+
+
+def test_deleting_both_people_of_a_direct_chat_removes_it(admin_client, as_user):
+    from app.db import SessionLocal
+    from app.models import Conversation
+
+    conv = as_user(OTHER_LOOKING).post("/api/conversations/direct", json={"user_id": LOOKING}).json()
+    admin = admin_client()
+    admin.delete(f"/api/admin/users/{OTHER_LOOKING}")
+    with SessionLocal() as db:
+        assert db.get(Conversation, conv["id"]) is not None  # the other student still has it
+    admin.delete(f"/api/admin/users/{LOOKING}")
+    with SessionLocal() as db:
+        assert db.get(Conversation, conv["id"]) is None
+
+
+def test_delete_everyone_then_seed_again(admin_client):
+    """Selecting every student and deleting them leaves nothing behind that stops a re-seed."""
+    from sqlalchemy import func, select, text
+
+    from app.db import SessionLocal
+    from app.models import Conversation, User
+    from app.seed import seed
+
+    admin = admin_client()
+    ids = admin.get("/api/admin/users/ids").json()
+    assert admin.post("/api/admin/users/bulk", json={"ids": ids, "action": "delete"}).json()["done"] == len(ids)
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(User)) == 0
+        assert db.scalar(select(func.count()).select_from(Conversation)) == 0
+        seed(db)
+        assert db.scalar(select(func.count()).select_from(User)) == 18
+        db.execute(text("select 1"))
 
 
 def test_delete_lead_hands_the_group_over(admin_client):

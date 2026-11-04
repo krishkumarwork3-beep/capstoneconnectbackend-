@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import admin_schemas as s
+from app import realtime
 from app.config import get_settings
 from app.db import SessionLocal
 from app.errors import AppError
@@ -198,9 +199,16 @@ def check_phone_free(db: Session, phone_normalized: str, except_user: str | None
         raise AppError("Another account already uses this phone number", 409)
 
 
+def end_sessions(db: Session, user_ids: Iterable[str]) -> None:
+    """Their open tabs are told at once (when `db` commits) that they are signed out; the API
+    already refuses their session from the next request on."""
+    realtime.publish(db, user_ids, {"type": "session.ended"})
+
+
 def ban(db: Session, user: User, reason: str) -> None:
     user.banned_at = utcnow()
     user.ban_reason = reason.strip() or None
+    end_sessions(db, [user.id])
 
 
 def unban(user: User) -> None:
@@ -223,19 +231,33 @@ def block_numbers(db: Session, admin: AdminUser, phones: Iterable[str], reason: 
             db.add(BannedPhone(phone_normalized=normalized, phone=raw, reason=reason.strip() or None, created_by=admin.email))
             added.append(normalized)
     db.flush()
+    if added:
+        end_sessions(db, db.scalars(select(User.id).where(User.phone_normalized.in_(added))))
     return s.BannedPhoneAdded(added=added, already=already, invalid=invalid)
 
 
 def delete_student(db: Session, user: User) -> None:
     """Leaves their group first (a Group Lead hands over to the longest-serving member, a last
     member closes the group), then deletes the account. Their requests, recommendations and chat
-    memberships go with it; messages they sent stay in group chats, without a sender id."""
+    memberships go with it; messages they sent stay in group chats, without a sender id. A direct
+    chat that has nobody left in it is deleted too."""
+    end_sessions(db, [user.id])
     membership = user.membership
     if membership is not None:
         rules.leave_group(db, membership.group, user)
         db.flush()
         db.expire(user, ["membership"])  # the membership row is gone; don't let delete touch it
+    direct = list(db.scalars(
+        select(Conversation.id)
+        .join(ConversationParticipant, ConversationParticipant.conversation_id == Conversation.id)
+        .where(ConversationParticipant.user_id == user.id, Conversation.type == "direct")
+    ))
     db.delete(user)
+    db.flush()
+    if direct:
+        empty = select(ConversationParticipant.conversation_id).where(ConversationParticipant.conversation_id.in_(direct))
+        for conv in db.scalars(select(Conversation).where(Conversation.id.in_(direct), Conversation.id.not_in(empty))):
+            db.delete(conv)
 
 
 # ---------------------------------------------------------------------------------------------

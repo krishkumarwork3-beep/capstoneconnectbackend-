@@ -365,6 +365,7 @@ def set_student_password(user_id: str, payload: s.PasswordSetIn, admin: AdminWri
     """Sets a new password. Every session of that student ends (they sign in with the new one)."""
     user = _student(db, user_id)
     user.password_hash = hash_password(payload.password)
+    ops.end_sessions(db, [user.id])
     ops.record(db, admin, "user.password", f"Set a new password for {user.name}", "user", user.id)
     db.commit()
 

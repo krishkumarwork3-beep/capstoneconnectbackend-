@@ -29,6 +29,7 @@ import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from starlette.concurrency import run_in_threadpool
+from starlette.websockets import WebSocketState
 
 from app import realtime
 from app.config import get_settings
@@ -190,6 +191,11 @@ async def socket(ws: WebSocket):
                 await run_in_threadpool(_typing, user_id, name, conversation_id, typing)
     except WebSocketDisconnect:
         pass
+    except RuntimeError:
+        # Starlette raises this when the socket is already closing (a close we sent, such as the
+        # 4401 after "session.ended", or the other side dropped mid-read): not a failure.
+        if ws.client_state == WebSocketState.CONNECTED and ws.application_state == WebSocketState.CONNECTED:
+            log.exception("realtime socket of %s failed", user_id)
     except Exception:
         log.exception("realtime socket of %s failed", user_id)
     finally:
