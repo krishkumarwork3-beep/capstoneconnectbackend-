@@ -35,7 +35,9 @@ jobs:
       - name: Tests
         run: uv run pytest -q --ignore=tests/attacks
       - name: Attack tests (fuzzing, injection, auth, sessions, races, SSRF, uploads, abuse)
-        run: uv run pytest -q tests/attacks
+        run: uv run pytest -q tests/attacks --ignore-glob="tests/attacks/test_ws_*.py" --ignore=tests/attacks/test_websocket.py
+      - name: WebSocket attack tests (frames fuzz, schemas, IDOR, sessions, ticket, heartbeat, backpressure, limits)
+        run: uv run pytest -q tests/attacks/test_websocket.py tests/attacks/test_ws_messages.py tests/attacks/test_ws_schema.py tests/attacks/test_ws_access.py tests/attacks/test_ws_sessions.py tests/attacks/test_ws_hardening.py
       - name: No known vulnerabilities in runtime dependencies (fails on any finding)
         run: |
           uv export --frozen --no-dev --no-hashes --format requirements-txt > requirements-audit.txt

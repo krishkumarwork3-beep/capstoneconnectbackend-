@@ -37,3 +37,9 @@ what covers each class and which test proves it.
 - [ ] `SECRET_KEY` 48+ random characters; `COOKIE_SECURE=true`; `ALLOWED_HOSTS`, `CORS_ORIGINS`, `PUBLIC_BASE_URL` set to the real names; `TRUSTED_PROXY_IPS` to the proxy.
 - [ ] Proxy: HTTPS only, `client_max_body_size 6m`, a request-rate limit (see SECURITY.md, Deployment layer).
 - [ ] Database: least-privilege role, `sslmode=require` if remote, backups scheduled.
+
+## WebSocket: the deployment-side halves (the code-side halves are covered, see SECURITY.md)
+- [ ] CSWSH: the edge passes `Origin` through unchanged to the API and does not cache or rewrite `/api/realtime/ticket`.
+- [ ] DoS / resource exhaustion: cap concurrent WebSocket upgrades per IP and total open sockets at the load balancer.
+- [ ] API abuse: bot-management or rate rules on `/api/ws` upgrades and `/api/realtime/ticket` per IP.
+- [ ] Brute force: edge rate rules on the sign-in and reset endpoints that also cover requests arriving just before a socket is opened.

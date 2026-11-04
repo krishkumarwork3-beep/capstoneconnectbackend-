@@ -71,6 +71,32 @@ Test files: API `tests/attacks/*.py` (plus `tests/test_*.py`); site `tests/unit/
 | OAuth / SSO, MFA | N/A: phone + password only; no OAuth or MFA endpoints exist | `test_abuse.py::test_no_graphql_oauth_mfa_xml_or_import_endpoints_exist` |
 | GraphQL | N/A as a server (the API only calls GitHub's) | `test_abuse.py::test_no_graphql_oauth_mfa_xml_or_import_endpoints_exist` |
 
+## WebSocket message layer
+
+What happens to frames once a socket is open (`app/routers/realtime.py`, `app/realtime.py`; the
+site's client `lib/realtime/`). Tests: `tests/attacks/test_ws_*.py` and `test_websocket.py`.
+
+| Class | Status | Proof |
+| --- | --- | --- |
+| Fuzzing over frames | Covered: every frame type × every field × the payload corpus (SQL, operators, shell, SSTI, XSS, CRLF, unicode, NUL, sizes, nesting, privileged fields), as anonymous, student and admin cookie; never an unhandled error, a leak or an echo to another participant | `test_ws_messages.py::test_fuzz_every_frame_type_and_field_as_a_student`, `::test_a_single_frame_never_kills_the_connection`, `::test_anonymous_sockets_never_get_to_send_anything`, `::test_an_admin_session_is_not_a_socket_session` |
+| Frame inventory | Covered: every accepted type classified (roles, object it is authorized against, what it writes) | `test_ws_messages.py::test_every_frame_type_is_classified`, `::test_unknown_frame_types_do_nothing` |
+| Schema validation | Covered: one strict model per type (`extra="forbid"`, strict JSON types, every field required, ids `^[A-Za-z0-9_-]{1,64}$`); depth checked before parsing; duplicate keys and `NaN`/`Infinity` refused; refusals answer `{type:error, code:invalid}` | `test_ws_schema.py::test_frames_must_match_their_type_exactly`, `::test_duplicate_keys_and_non_json_numbers_are_refused`, `::test_each_type_has_its_own_strict_schema` |
+| Injection over frames | Covered: ids only, ORM lookups by key, no LIKE, constant SQL with bound parameters (`LISTEN` via `psycopg.sql.Identifier`) | `test_ws_schema.py::test_database_calls_reachable_from_a_frame_are_parameterized`, fuzz |
+| Mass assignment over frames | Covered: privileged fields refused, never applied; the sender is always the connection | `test_ws_schema.py::test_privileged_fields_are_refused_and_never_applied`, `::test_the_real_sender_is_always_the_connection` |
+| Unsafe parsing | Covered: strict JSON only (no eval/exec, pickle, yaml, xml, templates on the socket path) | `test_ws_schema.py::test_frames_are_parsed_one_strict_way_only` |
+| IDOR over frames | Covered: every frame naming a conversation re-checks participation in the database (never cached); unknown and foreign ids answer the same `forbidden` | `test_ws_access.py::test_a_frame_naming_someone_elses_conversation_is_refused`, `::test_unknown_and_existing_conversations_answer_the_same`, `::test_removed_from_a_group_mid_session_can_no_longer_use_its_chat`, `::test_typing_shows_the_current_name_not_one_cached_at_connect` |
+| Lead-only socket actions | N/A: none exist (accept, remove, invite are HTTP only) | `test_ws_access.py::test_no_socket_action_needs_or_grants_a_role` |
+| XSS through pushed content | Covered: the client checks every event's shape (`lib/realtime/events.ts`) and renders text as React text; a hostile name and hostile messages pushed live stay inert | site `tests/unit/realtime-events.test.ts`, `e2e/xss.security.spec.ts` "payloads pushed live over the socket render as text" |
+| Tokens in the URL | Covered: never read from the query string | `test_ws_sessions.py::test_a_token_in_the_query_string_is_never_read`, `test_ws_hardening.py::test_a_ticket_in_the_url_is_not_read` |
+| Sockets outliving their session | Covered: log-out closes that session's socket; sign out everywhere, password reset or change, suspension, block, deletion close all; every acting frame re-checks the session | `test_ws_sessions.py` (`test_logout_closes_that_sessions_socket_now` … `test_a_revoked_session_is_refused_on_the_next_frame_even_without_the_push`) |
+| CSWSH (cross-site socket hijacking) | Covered (code side): exact Origin check plus a one-time ticket, bound to the session, required as the first frame; a valid cookie alone is refused. Edge-side controls: see SECURITY_CHECKLIST.md | `test_ws_hardening.py::test_a_valid_cookie_without_a_ticket_is_refused`, `::test_a_ticket_works_once`, `::test_a_ticket_is_bound_to_its_session`, `::test_tickets_can_not_be_had_cross_site_or_signed_out`, e2e "WebSocket: … no ticket is refused" |
+| Dead or stuck clients | Covered: server heartbeat (30 s, 20 s to answer → 4408), separate from the 90 s idle timeout | `test_ws_hardening.py::test_a_client_that_never_answers_the_heartbeat_is_closed`, `::test_a_wrong_acknowledgement_does_not_count` |
+| Slow consumers (backpressure) | Covered: outbound queue bounded at 256; a peer that can't keep up is closed once (1013) without slowing others | `test_ws_hardening.py::test_a_slow_consumer_has_a_bounded_queue_and_is_cut_off`, `::test_a_slow_consumer_does_not_slow_the_others` |
+| Write spam through one socket | Covered (code side): per-account budgets inside the handlers — receipts shared with `POST /conversations/{id}/read`, typing across all of an account's sockets — plus the per-connection frame limit | `test_ws_hardening.py::test_receipts_share_one_limit_between_http_and_the_socket`, `::test_socket_receipts_count_against_the_http_limit`, `::test_typing_is_limited_per_account_across_all_its_sockets` |
+| Races through frames | Covered: receipts from many sockets at once settle once; no seat, join or request action exists on the socket | `test_ws_sessions.py::test_receipts_racing_from_many_sockets_settle_once`, `::test_no_seat_join_or_request_action_exists_on_the_socket` |
+| Sign-in / OTP over the socket | N/A: no such frames (they share nothing because they don't exist) | `test_ws_sessions.py::test_sign_in_and_otp_can_not_be_driven_over_the_socket` |
+| GraphQL subscriptions | N/A: no endpoint, no server library, no runtime dependency | `test_ws_sessions.py::test_no_graphql_subscription_endpoint_exists`, `::test_no_graphql_server_exists` |
+
 ## Abuse and availability
 
 | Class | Status | Proof |
@@ -94,6 +120,7 @@ Test files: API `tests/attacks/*.py` (plus `tests/test_*.py`); site `tests/unit/
 | Concern | Setting |
 | --- | --- |
 | TLS everywhere, HSTS | Terminate HTTPS at the proxy; set `COOKIE_SECURE=true` (the API then sends `Strict-Transport-Security`). |
+| WebSocket at the edge | Keep the proxy from buffering socket frames, cap upgrades per IP and total open sockets, and bot rules on `/api/ws` and `/api/realtime/ticket` (the app enforces the per-account and per-connection side). |
 | Real client IPs for per-IP limits | `TRUSTED_PROXY_IPS=<proxy address>` (otherwise forwarded headers are ignored). |
 | Volumetric DDoS / connection floods | At the proxy or CDN, e.g. nginx `limit_req_zone $binary_remote_addr zone=api:10m rate=20r/s;`. |
 | Body size before the app | nginx `client_max_body_size 6m;` (matches `MAX_UPLOAD_BODY_BYTES`). |

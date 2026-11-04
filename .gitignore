@@ -28,3 +28,4 @@ backups/
 
 # Load-test output
 loadtest/results*
+test-results/
