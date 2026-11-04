@@ -69,20 +69,37 @@ def publish_now(to: Iterable[str], event: dict) -> None:
 class Connection:
     """One open socket. Events are queued and written by one task, so writes never interleave."""
 
-    def __init__(self, ws: WebSocket, user_id: str, name: str):
+    def __init__(self, ws: WebSocket, user_id: str, name: str, session_id: str | None = None):
         self.ws = ws
         self.user_id = user_id
         self.name = name
+        self.session_id = session_id
+        self.closing = False
         self.loop = asyncio.get_running_loop()
         self.queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=QUEUE_SIZE)
 
     def push(self, event: dict) -> None:
         """Called on this socket's own loop."""
+        if event.get("type") == "session.revoked":
+            # One session ended (log-out): only the socket on that session closes, and the
+            # session id itself never goes to a client.
+            if event.get("sid") == self.session_id:
+                self.close(4401, "Your session ended")
+            return
+        if self.closing:
+            return
         try:
             self.queue.put_nowait(event)
         except asyncio.QueueFull:
             log.warning("closing a socket of %s that fell behind", self.user_id)
-            asyncio.ensure_future(self.ws.close(code=1013))
+            self.close(1013, "Too far behind")
+
+    def close(self, code: int, reason: str = "") -> None:
+        """Closes once, from this socket's loop, without waiting for queued events."""
+        if self.closing:
+            return
+        self.closing = True
+        asyncio.ensure_future(self.ws.close(code=code, reason=reason))
 
     async def pump(self) -> None:
         while True:

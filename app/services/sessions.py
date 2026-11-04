@@ -20,6 +20,7 @@ from fastapi import Request
 from sqlalchemy import delete, text, update
 from sqlalchemy.orm import Session
 
+from app import realtime
 from app.models import AuthSession
 from app.security import decode_token, encode_token, token_matches_password
 
@@ -74,10 +75,13 @@ def revoke(db: Session, session_id: str | None) -> None:
 
 
 def revoke_token(db: Session, token: str | None, kind: str) -> None:
-    """Revokes the session a (still validly signed) token names, whoever presents it."""
+    """Revokes the session a (still validly signed) token names, whoever presents it. A student's
+    live socket on that session is closed as soon as `db` commits."""
     claims = decode_token(token or "", kind)
     if claims is not None:
         revoke(db, claims["sid"])
+        if kind == "student":
+            realtime.publish(db, [claims["sub"]], {"type": "session.revoked", "sid": claims["sid"]})
 
 
 def revoke_all(db: Session, kind: str, subject_ids, except_session: str | None = None) -> None:
@@ -92,11 +96,13 @@ def revoke_all(db: Session, kind: str, subject_ids, except_session: str | None =
 
 
 def end_everything(db: Session, kind: str, subject_ids) -> None:
-    """Sessions and, for students, outstanding reset grants (a password change, a suspension...)."""
+    """Sessions and, for students, outstanding reset grants (a password change, a suspension...).
+    Their live sockets are closed as soon as `db` commits."""
     ids = list(subject_ids)
     revoke_all(db, kind, ids)
     if kind == "student":
         revoke_all(db, "reset", ids)
+        realtime.publish(db, ids, {"type": "session.ended"})
 
 
 _SPEND = text(

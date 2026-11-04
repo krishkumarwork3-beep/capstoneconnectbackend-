@@ -191,9 +191,7 @@ def check_phone_free(db: Session, phone_normalized: str, except_user: str | None
 def end_sessions(db: Session, user_ids: Iterable[str]) -> None:
     """Revokes every session (and reset grant) of these students, and tells their open tabs at
     once (when `db` commits) that they are signed out."""
-    ids = list(user_ids)
-    sessions.end_everything(db, "student", ids)
-    realtime.publish(db, ids, {"type": "session.ended"})
+    sessions.end_everything(db, "student", list(user_ids))  # also tells their open sockets
 
 
 def ban(db: Session, user: User, reason: str) -> None:

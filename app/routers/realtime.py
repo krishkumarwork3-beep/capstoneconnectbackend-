@@ -169,7 +169,7 @@ def _token(ws: WebSocket) -> str | None:
     return header[7:].strip() or None if header.lower().startswith("bearer ") else None
 
 
-def _session_user(token: str | None) -> tuple[str, str] | None:
+def _session_user(token: str | None) -> tuple[str, str, str] | None:
     """(user id, name) while the session row is live: log-out, "sign out everywhere", a password
     change or a suspension ends it, and the next heartbeat closes the socket (4401)."""
     with SessionLocal() as db:
@@ -181,7 +181,7 @@ def _session_user(token: str | None) -> tuple[str, str] | None:
             return None
         if bans.is_blocked(db, user):  # suspended in the admin portal: the socket closes (4401)
             return None
-        return user.id, user.name
+        return user.id, user.name, found[1]
 
 
 def _presence(user_id: str, online: bool) -> None:
@@ -286,6 +286,11 @@ async def _handle(ws: WebSocket, conn: "realtime.Connection", frame: "Frame", st
     """Acts on one valid frame. True when the socket was closed."""
     kind = frame.type
     conversation_id = getattr(frame, "conversation_id", None)
+    if kind != "ping" and await run_in_threadpool(_session_user, state.token) is None:
+        # Checked on every frame that acts, not only at the handshake and the heartbeat: a
+        # session ended any way (even if its push was lost) can't act once more.
+        await ws.close(code=4401, reason="Your session ended")
+        return True
     if kind == "ping":
         conn.push({"type": "pong"})
         if time.monotonic() - state.last_heartbeat >= HEARTBEAT_SECONDS:
@@ -328,10 +333,10 @@ async def socket(ws: WebSocket):
     if who is None:
         await ws.close(code=4401, reason="Sign in to continue")
         return
-    user_id, name = who
+    user_id, name, session_id = who
     await run_in_threadpool(realtime.ensure_listener)
 
-    conn = realtime.Connection(ws, user_id, name)
+    conn = realtime.Connection(ws, user_id, name, session_id)
     first = realtime.hub.try_add(conn, MAX_SOCKETS_PER_USER, get_settings().ws_max_sockets)
     if first is None:
         await ws.close(code=1008, reason="Too many open connections")
