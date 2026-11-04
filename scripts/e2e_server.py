@@ -34,6 +34,8 @@ def _base_url() -> str:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--production-like", action="store_true",
+                        help="HTTPS behind the test proxy: Secure cookies, a random SECRET_KEY, no dev codes")
     args = parser.parse_args()
 
     base = _base_url()
@@ -67,6 +69,23 @@ def main() -> None:
         "PUBLIC_BASE_URL": f"http://localhost:{args.port}",
     })
 
+    if args.production_like:
+        import secrets
+
+        # As on a real HTTPS deployment (the API refuses to start otherwise).
+        os.environ.update({
+            "COOKIE_SECURE": "true",
+            "SECRET_KEY": secrets.token_urlsafe(48),
+            "ALLOW_DEV_CODE": "false",
+            "DEMO_LOGIN": "false",
+            "SMS_PROVIDER": "console",
+            "PUBLIC_BASE_URL": "https://localhost:8443",
+            "CORS_ORIGINS": '["https://localhost:3443","https://localhost:3543"]',
+        })
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+
     from alembic import command
     from alembic.config import Config
 
@@ -86,7 +105,9 @@ def main() -> None:
 
     import uvicorn
 
-    uvicorn.run("app.main:app", host="127.0.0.1", port=args.port, log_level="warning")
+    # Behind the proxy (e2e/https/proxy.mjs on 127.0.0.1): its X-Forwarded-* headers are believed.
+    uvicorn.run("app.main:app", host="127.0.0.1", port=args.port, log_level="warning",
+                proxy_headers=True, forwarded_allow_ips="127.0.0.1")
 
 
 if __name__ == "__main__":
