@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app import admin_schemas as s
 from app import realtime
+from app.services import uploads
 from app.config import get_settings
 from app.db import SessionLocal
 from app.errors import AppError
@@ -181,8 +182,8 @@ def student_detail(db: Session, user: User) -> s.StudentDetail:
         **row.model_dump(),
         bio=user.bio or "",
         skills=list(user.skills or []),
-        avatar_url=user.avatar_url,
-        resume_url=user.resume_url,
+        avatar_url=uploads.public_url(user.avatar_url),
+        resume_url=uploads.public_url(user.resume_url),
         github_verified=bool(user.github_verified),
         requests_sent=count(select(func.count()).select_from(JoinRequest).where(JoinRequest.sender_id == user.id)),
         requests_received=count(select(func.count()).select_from(JoinRequest).where(JoinRequest.receiver_id == user.id)),

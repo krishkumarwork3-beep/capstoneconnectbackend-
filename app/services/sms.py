@@ -1,12 +1,15 @@
 """Sends SMS. "console" (development) logs the message; "twilio" sends it through Twilio's REST API."""
 
 import logging
+import re
 
 import httpx
 
 from app.config import get_settings
 
 log = logging.getLogger("capstoneconnect.sms")
+# A reset code in a message (4 to 8 digits on their own).
+CODE = re.compile(r"\b\d{4,8}\b")
 
 
 class SmsError(Exception):
@@ -18,8 +21,16 @@ def send_sms(to_e164: str, body: str) -> None:
     if settings.sms_provider == "twilio":
         _send_twilio(to_e164, body)
         return
-    # Development: the message goes to the server log instead of a phone.
-    log.warning("SMS to %s: %s", to_e164, body)
+    # Development: the message goes to the server log instead of a phone. The code itself is only
+    # written there with ALLOW_DEV_CODE=true (a laptop); otherwise it is masked, as is the number.
+    if settings.allow_dev_code:
+        log.warning("SMS to %s: %s", to_e164, body)
+    else:
+        log.warning("SMS to %s: %s", mask_number(to_e164), CODE.sub("••••••", body))
+
+
+def mask_number(e164: str) -> str:
+    return f"{e164[:3]}•••••{e164[-3:]}" if len(e164) > 6 else "•••"
 
 
 def _send_twilio(to_e164: str, body: str) -> None:

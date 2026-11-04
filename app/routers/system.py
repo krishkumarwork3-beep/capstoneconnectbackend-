@@ -1,10 +1,15 @@
 """Navbar badges, presence, GitHub username checks and a health check."""
 
+import logging
+import os
+
 from fastapi import APIRouter, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app import schemas
 from app.deps import DB, CurrentUser
+from app.config import get_settings
 from app.errors import AppError
 from app.models import utcnow
 from app.services import chat, github
@@ -52,5 +57,12 @@ async def verify_github(username: str = Query(min_length=1, max_length=100)):
 
 @router.get("/health")
 def health(db: DB):
-    db.execute(text("select 1"))
-    return {"status": "ok"}
+    """For load balancers and uptime checks: 200 when the database answers, 503 when it doesn't."""
+    try:
+        db.execute(text("select 1"))
+    except Exception:
+        logging.getLogger("app.health").exception("Health check: the database is not answering")
+        return JSONResponse({"status": "unavailable", "database": "down"}, status_code=503)
+    if get_settings().expose_worker_pid:
+        return {"status": "ok", "database": "ok", "worker": os.getpid()}
+    return {"status": "ok", "database": "ok"}

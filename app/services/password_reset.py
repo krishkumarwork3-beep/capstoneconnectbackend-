@@ -8,6 +8,7 @@
    signs out every existing session.
 """
 
+import logging
 import secrets
 from datetime import UTC, datetime, timedelta
 
@@ -33,6 +34,7 @@ from app.security import (
 from app.services.sms import SmsError, send_sms
 
 GENERIC = "If an account uses that number, a code is on its way."
+log = logging.getLogger("app.password_reset")
 
 
 def _user_by_phone(db: Session, phone: str) -> User | None:
@@ -91,6 +93,9 @@ def request_code(db: Session, phone: str) -> dict:
         )
     except SmsError as exc:
         db.rollback()
+        log.error("Password-reset SMS failed: %s", exc)
+        if get_settings().sms_provider == "twilio" and "missing" in str(exc):
+            raise AppError("Password reset by SMS is not set up on this site yet. Contact the site admin.", 503) from exc
         raise AppError("We could not send the SMS. Try again in a minute.", 502) from exc
     db.commit()
     # Only for local development (see config.allow_dev_code): the code is otherwise a secret.

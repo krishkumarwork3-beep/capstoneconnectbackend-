@@ -1,9 +1,11 @@
 """Settings, read from the environment (and `.env`). See `.env.example` for every variable."""
 
+import re
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -24,6 +26,18 @@ class Settings(BaseSettings):
     # Cookies need Secure over HTTPS (production); local http://localhost needs it off.
     cookie_secure: bool = False
     cookie_name: str = "cc_session"
+    # "lax" (default) when the site and the API share a site (subdomains of one domain, or one
+    # origin through a proxy); "none" only when they are on different sites, and then
+    # COOKIE_SECURE must be true. See app.cookies for every layout.
+    cookie_samesite: Literal["lax", "strict", "none"] = "lax"
+    # Empty: the cookie belongs to the API's host only. "example.com": shared by its subdomains.
+    cookie_domain: str = ""
+    # Reverse proxies whose X-Forwarded-For / X-Forwarded-Proto are believed (comma-separated IPs
+    # or networks, or "*" when only the proxy can reach the API). Empty: those headers are ignored
+    # and the connecting address is the visitor's (the per-IP sign-in limits use it).
+    trusted_proxy_ips: str = ""
+    # Tests only: /api/health also reports which worker process answered.
+    expose_worker_pid: bool = False
 
     # The frontend origins allowed to call the API with cookies.
     cors_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
@@ -33,6 +47,15 @@ class Settings(BaseSettings):
     # Where uploaded avatars, resumes and chat attachments are stored, and their public base URL.
     upload_dir: Path = ROOT / "uploads"
     public_base_url: str = "http://localhost:8000"
+    # "local" (UPLOAD_DIR, needs a persistent disk) or "s3" (any S3-compatible object storage:
+    # AWS S3, Cloudflare R2, Backblaze B2, MinIO). See app.services.storage.
+    storage_backend: Literal["local", "s3"] = "local"
+    s3_bucket: str = ""
+    s3_endpoint_url: str = ""  # empty for AWS; e.g. https://<account>.r2.cloudflarestorage.com
+    s3_region: str = ""
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    s3_prefix: str = ""  # optional folder inside the bucket
 
     # Password reset by SMS one-time code.
     otp_length: int = 6
@@ -83,6 +106,16 @@ class Settings(BaseSettings):
     verify_limit_per_phone: int = 10
     verify_limit_per_ip: int = 30
     verify_window_minutes: int = 15
+
+
+    @model_validator(mode="after")
+    def _cookie_rules(self) -> "Settings":
+        if self.cookie_samesite == "none" and not self.cookie_secure:
+            raise ValueError("COOKIE_SAMESITE=none needs COOKIE_SECURE=true (browsers drop SameSite=None cookies without Secure)")
+        domain = self.cookie_domain.strip()
+        if domain and not re.fullmatch(r"\.?([a-z0-9-]+\.)+[a-z]{2,}", domain.lower()):
+            raise ValueError("COOKIE_DOMAIN must be a domain like example.com (no scheme, port or path)")
+        return self
 
 
 @lru_cache

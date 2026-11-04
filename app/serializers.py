@@ -2,6 +2,7 @@
 
 from app import schemas
 from app.models import Conversation, Group, JoinRequest, Message, Recommendation, User
+from app.services.uploads import public_url
 
 
 def mask_phone(normalized: str) -> str:
@@ -25,9 +26,9 @@ def user_out(user: User, show_phone: bool = True) -> schemas.UserOut:
         phone_visible=show_phone,
         bio=user.bio or "",
         skills=list(user.skills or []),
-        resume_url=user.resume_url,
+        resume_url=public_url(user.resume_url),
         github_url=user.github_url,
-        avatar_url=user.avatar_url,
+        avatar_url=public_url(user.avatar_url),
         group_id=membership.group_id if membership else None,
         group_name=membership.group.name if membership else None,
         group_role=membership.role if membership else None,  # type: ignore[arg-type]
@@ -58,7 +59,7 @@ def group_out(group: Group) -> schemas.GroupOut:
                 passing_year=m.user.passing_year,
                 role=m.role,  # type: ignore[arg-type]
                 joined_at=m.joined_at,
-                avatar_url=m.user.avatar_url,
+                avatar_url=public_url(m.user.avatar_url),
                 github_url=m.user.github_url,
             )
             for m in members
@@ -140,7 +141,7 @@ def conversation_out(conv: Conversation, viewer_id: str) -> schemas.Conversation
                 id=u.id,
                 name=u.name,
                 college=u.college,
-                avatar_url=u.avatar_url,
+                avatar_url=public_url(u.avatar_url),
                 last_seen=u.last_seen,
                 last_delivered_at=receipts[u.id].last_delivered_at,
                 last_read_at=receipts[u.id].last_read_at,
@@ -155,7 +156,7 @@ def conversation_out(conv: Conversation, viewer_id: str) -> schemas.Conversation
 
 def message_out(message: Message, client_id: str | None = None) -> schemas.ChatMessageOut:
     attachment = (
-        schemas.AttachmentIO(name=message.attachment_name, url=message.attachment_url or "", size=message.attachment_size or 0)
+        schemas.AttachmentIO(name=message.attachment_name, url=public_url(message.attachment_url) or "", size=message.attachment_size or 0)
         if message.attachment_name
         else None
     )

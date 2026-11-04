@@ -1,34 +1,25 @@
-"""Uploaded files, under /uploads (outside /api, so links stored before this change keep working).
+"""Uploaded files, under /uploads (outside /api, so links stored before the API kept paths still work).
 
 - /uploads/avatar/…      public (profile photos are shown to guests too)
 - /uploads/resume/…      any signed-in student, or an admin
 - /uploads/attachment/…  the participants of the conversation the file was sent in, or an admin
 
-Names are checked against the stored-name pattern before the disk is touched, so `..` and other
-paths are refused (404).
+The bytes come from the configured storage (local disk or S3-compatible). Names are checked
+against the stored-name pattern before storage is touched, so `..` and other paths are refused.
 """
 
 from typing import Literal
+from urllib.parse import quote
 
-from fastapi import APIRouter, Request
-from fastapi.responses import FileResponse
-from sqlalchemy import select
+from fastapi import APIRouter, Request, Response
+from sqlalchemy import or_, select
 
-from app.config import get_settings
 from app.deps import DB, OptionalUser, current_admin
 from app.errors import AppError, not_found
 from app.models import ConversationParticipant, Message
 from app.services import uploads
 
 router = APIRouter(prefix="/uploads", tags=["files"])
-
-MEDIA = {
-    "png": "image/png",
-    "jpg": "image/jpeg",
-    "pdf": "application/pdf",
-    "zip": "application/zip",
-    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-}
 
 
 def _is_admin(request: Request, db) -> bool:
@@ -39,18 +30,29 @@ def _is_admin(request: Request, db) -> bool:
         return False
 
 
+def _disposition(inline: bool, filename: str, fallback: str) -> str:
+    safe = "".join(c for c in filename if c not in '"\\\r\n')
+    ascii_name = safe.encode("ascii", "ignore").decode().strip() or fallback
+    value = f'{"inline" if inline else "attachment"}; filename="{ascii_name}"'
+    if ascii_name != safe:
+        value += f"; filename*=UTF-8''{quote(safe)}"
+    return value
+
+
 @router.get("/{purpose}/{name}")
 def get_file(purpose: Literal["avatar", "resume", "attachment"], name: str, request: Request, db: DB, user: OptionalUser):
-    path = uploads.stored_path(purpose, name)
-    if path is None:
+    if not uploads.is_ours(purpose, name):
         raise not_found("File")
 
     filename = name
     if purpose == "resume" and user is None and not _is_admin(request, db):
         raise AppError("Sign in to see résumés", 401)
     if purpose == "attachment":
-        url = f"{get_settings().public_base_url}/uploads/attachment/{name}"
-        message = db.scalar(select(Message).where(Message.attachment_url == url).limit(1))
+        path = uploads.path_of(purpose, name)
+        # Stored as a path; a full link from before the migration also matches.
+        message = db.scalar(
+            select(Message).where(or_(Message.attachment_url == path, Message.attachment_url.endswith(path))).limit(1)
+        )
         if not _is_admin(request, db):
             if user is None:
                 raise AppError("Sign in to see this file", 401)
@@ -65,17 +67,19 @@ def get_file(purpose: Literal["avatar", "resume", "attachment"], name: str, requ
         if message and message.attachment_name:
             filename = message.attachment_name
 
+    data = uploads.read(purpose, name)
+    if data is None:
+        raise not_found("File")
     ext = name.rsplit(".", 1)[1]
     # Chat attachments download under their original name (the chat's link asks for a download,
     # which browsers only honour from the server for a link to another origin); photos and
     # résumés open in the browser.
     inline = purpose != "attachment" and ext in ("png", "jpg", "pdf")
-    return FileResponse(
-        path,
-        media_type=MEDIA[ext],
-        filename=filename,
-        content_disposition_type="inline" if inline else "attachment",
+    return Response(
+        content=data,
+        media_type=uploads.MEDIA[ext],
         headers={
+            "Content-Disposition": _disposition(inline, filename, name),
             "X-Content-Type-Options": "nosniff",
             "Cache-Control": "public, max-age=86400" if purpose == "avatar" else "private, no-store",
         },

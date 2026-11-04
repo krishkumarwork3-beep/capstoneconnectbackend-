@@ -37,6 +37,12 @@ def problems(settings: Settings) -> list[tuple[str, str]]:
         len(settings.admin_password) < 12 or settings.admin_password.lower() in WEAK_ADMIN_PASSWORDS
     ):
         found.append(("warning", "ADMIN_PASSWORD is short or a common password: use 12+ random characters"))
+    if settings.sms_provider == "twilio" and not (settings.twilio_account_sid and settings.twilio_auth_token and settings.twilio_from_number):
+        found.append(("fatal", "SMS_PROVIDER=twilio but TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN or TWILIO_FROM_NUMBER is missing"))
+    if settings.storage_backend == "s3" and not settings.s3_bucket:
+        found.append(("fatal", "STORAGE_BACKEND=s3 but S3_BUCKET is empty"))
+    if settings.cookie_secure and settings.public_base_url.startswith("http://"):
+        found.append(("warning", "PUBLIC_BASE_URL is http:// while cookies are Secure: file links would be mixed content"))
     if any(o.startswith("http://") and "localhost" not in o and "127.0.0.1" not in o for o in settings.cors_origins):
         found.append(("warning", "CORS_ORIGINS includes a plain-HTTP origin"))
     return found

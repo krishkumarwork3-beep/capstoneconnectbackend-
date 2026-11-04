@@ -3,7 +3,7 @@
 from datetime import datetime
 
 from fastapi import APIRouter, File, UploadFile
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app import schemas
 from app.deps import DB, CurrentUser
@@ -47,11 +47,13 @@ def send(conversation_id: str, payload: schemas.SendMessageIn, db: DB, user: Cur
         # Only a file just uploaded here, and not one already shared elsewhere: attachments are
         # readable by the conversation they were sent in, so a link can't be re-shared to gain access.
         parsed = uploads.parse_url(attachment["url"])
-        if parsed is None or parsed[0] != "attachment" or uploads.stored_path(*parsed) is None:
+        if parsed is None or parsed[0] != "attachment" or not uploads.exists(*parsed):
             raise AppError("Upload the file first, then send it", 422)
-        if db.scalar(select(Message.id).where(Message.attachment_url == attachment["url"]).limit(1)):
+        path = uploads.path_of(*parsed)
+        if db.scalar(select(Message.id).where(or_(Message.attachment_url == path, Message.attachment_url.endswith(path))).limit(1)):
             raise AppError("That file was already sent. Upload it again to share it here.", 409)
-        attachment["size"] = uploads.stored_path(*parsed).stat().st_size  # the real size, not the client's
+        attachment["url"] = path  # stored as a path (see app.services.uploads)
+        attachment["size"] = uploads.size(*parsed)  # the real size, not the client's
     message = chat.send_message(db, conv, user, payload.text, attachment, payload.client_id)
     db.commit()
     return message_out(message, payload.client_id)
@@ -66,5 +68,5 @@ def mark_read(conversation_id: str, db: DB, user: CurrentUser):
 @router.post("/uploads/attachments", response_model=schemas.AttachmentIO, status_code=201)
 async def upload_attachment(_: CurrentUser, file: UploadFile = File(...)):
     """Upload first, then send the message with the returned {name, url, size}."""
-    url, name, size = await uploads.save(file, "attachment")
-    return {"name": name, "url": url, "size": size}
+    path, name, size = await uploads.save(file, "attachment")
+    return {"name": name, "url": uploads.public_url(path), "size": size}

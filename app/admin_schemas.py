@@ -291,6 +291,13 @@ class MessageRow(Out):
     attachment_url: str | None = None
     created_at: datetime
 
+    @field_validator("attachment_url")
+    @classmethod
+    def _link(cls, value: str | None) -> str | None:
+        from app.services.uploads import public_url
+
+        return public_url(value)
+
 
 class AuditRow(Out):
     id: str

@@ -148,20 +148,22 @@ def _apply_github(user: User, url: str | None, wants_verified: bool) -> None:
 async def upload_avatar(user_id: str, db: DB, me: CurrentUser, avatar: UploadFile = File(...)):
     if user_id != me.id:
         raise AppError("You can only change your own photo", 403)
-    url, _, _ = await uploads.save(avatar, "avatar")
-    me.avatar_url = url
+    path, _, _ = await uploads.save(avatar, "avatar")
+    uploads.remove(me.avatar_url)  # the previous photo is no longer used
+    me.avatar_url = path
     db.commit()
-    return {"avatar_url": url}
+    return {"avatar_url": uploads.public_url(path)}
 
 
 @router.post("/{user_id}/resume")
 async def upload_resume(user_id: str, db: DB, me: CurrentUser, resume: UploadFile = File(...)):
     if user_id != me.id:
         raise AppError("You can only change your own resume", 403)
-    url, _, _ = await uploads.save(resume, "resume")
-    me.resume_url = url
+    path, _, _ = await uploads.save(resume, "resume")
+    uploads.remove(me.resume_url)
+    me.resume_url = path
     db.commit()
-    return {"resume_url": url}
+    return {"resume_url": uploads.public_url(path)}
 
 
 @router.get("/{user_id}/github", response_model=schemas.GitHubActivityOut)

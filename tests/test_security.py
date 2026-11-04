@@ -36,7 +36,8 @@ def test_unsafe_settings_stop_a_secure_deployment():
     with pytest.raises(RuntimeError, match="ALLOW_DEV_CODE"):
         startup_check(Settings(cookie_secure=True, secret_key="x" * 8 + "abcdefghijklmnopqrstuvwxyz0123456789", allow_dev_code=True))
     good = Settings(cookie_secure=True, secret_key="Q7v-2kLp9xZr4TbW8mNc1yHs6dFg3jEa5uRo0iVq", demo_login=False,
-                    allow_dev_code=False, sms_provider="twilio", admin_password="")
+                    allow_dev_code=False, sms_provider="twilio", twilio_account_sid="AC-test", twilio_auth_token="t",
+                    twilio_from_number="+15550000000", admin_password="", public_base_url="https://api.example.com")
     startup_check(good)
     assert problems(good) == []
     # On a laptop (plain HTTP) the same settings only warn.

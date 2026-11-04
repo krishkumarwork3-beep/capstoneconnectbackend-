@@ -4,6 +4,8 @@ The rule messages are the exact strings the UI (and its mock store) uses, so the
 appears whichever backend is in use.
 """
 
+import logging
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -51,6 +53,19 @@ def install_error_handlers(app: FastAPI) -> None:
         # Two requests changed the same thing at once (a student joining two groups, a phone
         # number taken in between): the database refused one of them.
         return JSONResponse({"message": "That changed while you were working on it. Refresh and try again."}, status_code=409)
+
+    @app.exception_handler(Exception)
+    async def _unexpected(_: Request, exc: Exception):
+        # Logged in full on the server; the visitor gets a plain message and the id to quote.
+        from app.observability import request_id
+
+        rid = request_id.get()
+        logging.getLogger("app.errors").exception("Unhandled error (request %s)", rid, exc_info=exc)
+        return JSONResponse(
+            {"message": "Something went wrong on our side. Try again in a moment.", "request_id": rid},
+            status_code=500,
+            headers={"X-Request-ID": rid},
+        )
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(_: Request, exc: RequestValidationError):

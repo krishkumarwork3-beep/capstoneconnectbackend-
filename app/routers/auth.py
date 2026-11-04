@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app import schemas
 from app.config import get_settings
+from app.cookies import clear_session_cookie, set_session_cookie
 from app.deps import DB, CurrentUser, OptionalUser
 from app.errors import AppError
 from app.models import User, utcnow
@@ -27,16 +28,9 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 def _start_session(response: Response, user: User) -> None:
     settings = get_settings()
-    response.set_cookie(
-        settings.cookie_name,
-        create_session_token(user.id, user.password_hash),
-        max_age=settings.session_days * 86400,
-        httponly=True,
-        secure=settings.cookie_secure,
-        # Lax: sent on same-site requests (the frontend and API on one site), never cross-site POSTs.
-        samesite="lax",
-        path="/",
-    )
+    # SameSite, Secure and Domain come from the settings (see app.cookies for the layouts).
+    set_session_cookie(response, settings.cookie_name, create_session_token(user.id, user.password_hash),
+                       settings.session_days * 86400)
 
 
 @router.post("/signup", response_model=schemas.UserOut, status_code=201)
@@ -99,7 +93,7 @@ def login(payload: schemas.LoginIn, request: Request, response: Response, db: DB
 
 @router.post("/logout", status_code=204)
 def logout(response: Response):
-    response.delete_cookie(get_settings().cookie_name, path="/")
+    clear_session_cookie(response, get_settings().cookie_name)
 
 
 @router.get("/me", response_model=schemas.UserOut)

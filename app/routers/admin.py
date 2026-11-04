@@ -17,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app import admin_schemas as s
 from app.config import get_settings
+from app.cookies import clear_session_cookie, set_session_cookie
 from app.deps import DB, AdminWriter, CurrentAdmin
 from app.errors import AppError, not_found
 from app.models import (
@@ -58,21 +59,14 @@ def admin_login(payload: s.AdminLoginIn, response: Response, db: DB):
     admin = ops.authenticate(db, payload.email, payload.password)
     db.commit()
     settings = get_settings()
-    response.set_cookie(
-        settings.admin_cookie_name,
-        create_admin_token(admin.id, admin.password_hash),
-        max_age=settings.admin_session_hours * 3600,
-        httponly=True,
-        secure=settings.cookie_secure,
-        samesite="lax",
-        path="/",
-    )
+    set_session_cookie(response, settings.admin_cookie_name, create_admin_token(admin.id, admin.password_hash),
+                       settings.admin_session_hours * 3600)
     return admin
 
 
 @auth.post("/auth/logout", status_code=204)
 def admin_logout(response: Response):
-    response.delete_cookie(get_settings().admin_cookie_name, path="/")
+    clear_session_cookie(response, get_settings().admin_cookie_name)
 
 
 @auth.get("/auth/me", response_model=s.AdminOut)
@@ -90,15 +84,8 @@ def change_own_password(payload: s.AdminPasswordIn, response: Response, admin: C
     ops.record(db, admin, "admin.password", "Changed their own password", "admin", admin.id)
     db.commit()
     settings = get_settings()
-    response.set_cookie(
-        settings.admin_cookie_name,
-        create_admin_token(admin.id, admin.password_hash),
-        max_age=settings.admin_session_hours * 3600,
-        httponly=True,
-        secure=settings.cookie_secure,
-        samesite="lax",
-        path="/",
-    )
+    set_session_cookie(response, settings.admin_cookie_name, create_admin_token(admin.id, admin.password_hash),
+                       settings.admin_session_hours * 3600)
 
 
 admins = APIRouter(tags=["admin: admin accounts"])

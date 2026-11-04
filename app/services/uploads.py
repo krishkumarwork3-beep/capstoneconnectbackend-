@@ -1,18 +1,23 @@
-"""Stores uploaded files on disk (UPLOAD_DIR); app.routers.files serves them under /uploads.
+"""Uploaded files: checks, storage (app.services.storage) and their links.
 
 Types are checked by content (the file's first bytes), not only by name, and sizes are capped.
 Avatars are public; résumés need a sign-in, and chat attachments are only for the conversation's
-participants (and admins).
+participants (and admins); app.routers.files serves them all under /uploads.
+
+The database keeps a file's path ("/uploads/resume/res_….pdf"), not a full URL: the API adds
+PUBLIC_BASE_URL when it answers (`public_url`), so moving the API to another domain keeps every
+link working. Older rows with full URLs are converted by a migration, and `parse_url` still
+understands them.
 """
 
 import re
-from pathlib import Path
 
 from fastapi import UploadFile
 
 from app.config import get_settings
 from app.errors import AppError
 from app.security import new_id
+from app.services.storage import get_storage
 
 MB = 1024 * 1024
 
@@ -30,40 +35,65 @@ RULES = {
     "attachment": ({"png", "jpg", "pdf", "zip"}, 5 * MB, "a PDF, PNG, JPG, DOCX or ZIP", "up to 5 MB"),
 }
 
+MEDIA = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "pdf": "application/pdf",
+    "zip": "application/zip",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
 
 # The only names files are stored under (new_id + extension): anything else is not one of ours.
 STORED_NAME = re.compile(r"^[a-z]{3}_[0-9a-f]{16}\.(png|jpg|pdf|zip|docx)$")
 PURPOSES = ("avatar", "resume", "attachment")
+PREFIX = "/uploads/"
 
 
-def stored_path(purpose: str, name: str) -> Path | None:
-    """The file on disk for /uploads/{purpose}/{name}, or None if that is not a stored file's name
-    (which also rules out path traversal)."""
-    if purpose not in PURPOSES or not STORED_NAME.match(name):
-        return None
-    path = get_settings().upload_dir / purpose / name
-    return path if path.is_file() else None
+def is_ours(purpose: str, name: str) -> bool:
+    """A name we could have stored (which also rules out path traversal)."""
+    return purpose in PURPOSES and bool(STORED_NAME.match(name))
+
+
+def path_of(purpose: str, name: str) -> str:
+    return f"{PREFIX}{purpose}/{name}"
+
+
+def exists(purpose: str, name: str) -> bool:
+    return is_ours(purpose, name) and get_storage().exists(f"{purpose}/{name}")
+
+
+def read(purpose: str, name: str) -> bytes | None:
+    return get_storage().get(f"{purpose}/{name}") if is_ours(purpose, name) else None
+
+
+def size(purpose: str, name: str) -> int | None:
+    return get_storage().size(f"{purpose}/{name}") if is_ours(purpose, name) else None
 
 
 def parse_url(url: str | None) -> tuple[str, str] | None:
-    """(purpose, name) of one of this server's upload URLs, else None."""
-    prefix = f"{get_settings().public_base_url}/uploads/"
-    if not url or not url.startswith(prefix):
+    """(purpose, name) of one of our files, from its path or a full link (any host: links made
+    before a domain change still count), else None."""
+    if not url or PREFIX not in url:
         return None
-    parts = url[len(prefix):].split("/")
-    if len(parts) != 2 or parts[0] not in PURPOSES or not STORED_NAME.match(parts[1]):
+    parts = url.split(PREFIX, 1)[1].split("?", 1)[0].split("/")
+    if len(parts) != 2 or not is_ours(parts[0], parts[1]):
         return None
     return parts[0], parts[1]
 
 
-def remove(url: str | None) -> bool:
-    """Deletes the stored file behind one of our URLs. True if a file was deleted."""
-    parsed = parse_url(url)
-    path = stored_path(*parsed) if parsed else None
-    if path is None:
-        return False
-    path.unlink(missing_ok=True)
-    return True
+def public_url(stored: str | None) -> str | None:
+    """The link the browser uses: PUBLIC_BASE_URL + the file's path. A full link to one of our
+    files from an older row (any host) is pointed at the current one too; other values pass through."""
+    parsed = parse_url(stored)
+    if parsed:
+        return f"{get_settings().public_base_url}{path_of(*parsed)}"
+    return stored
+
+
+def remove(stored: str | None) -> bool:
+    """Deletes the file behind a stored path (or a link to one of ours). True if one was deleted."""
+    parsed = parse_url(stored)
+    return bool(parsed) and get_storage().delete(f"{parsed[0]}/{parsed[1]}")
 
 
 def _kind_of(head: bytes) -> str | None:
@@ -71,7 +101,7 @@ def _kind_of(head: bytes) -> str | None:
 
 
 async def save(upload: UploadFile, purpose: str) -> tuple[str, str, int]:
-    """Saves the file and returns (public URL, original name, size)."""
+    """Stores the file and returns (stored path, original name, size)."""
     allowed, limit, what, size_text = RULES[purpose]
     data = await upload.read(limit + 1)
     if len(data) > limit:
@@ -82,10 +112,6 @@ async def save(upload: UploadFile, purpose: str) -> tuple[str, str, int]:
     name = upload.filename or f"file.{kind}"
     # A .docx is a ZIP inside; keep its own extension so it opens in Word.
     ext = "docx" if kind == "zip" and name.lower().endswith(".docx") else kind
-
-    settings = get_settings()
-    folder = settings.upload_dir / purpose
-    folder.mkdir(parents=True, exist_ok=True)
     stored = f"{new_id(purpose[:3])}.{ext}"
-    (folder / stored).write_bytes(data)
-    return f"{settings.public_base_url}/uploads/{purpose}/{stored}", name, len(data)
+    get_storage().put(f"{purpose}/{stored}", data, MEDIA[ext])
+    return path_of(purpose, stored), name, len(data)
