@@ -1,3 +1,5 @@
+import json
+from contextlib import contextmanager
 """Tests run against a real PostgreSQL test database (never the development one).
 
 The URL is TEST_DATABASE_URL, or DATABASE_URL (from .env) with the database renamed
@@ -140,3 +142,15 @@ def admin_client():
     yield make
     for c in clients:
         c.close()
+
+
+@contextmanager
+def ws_connect(client, **kwargs):
+    """The live socket opened the way the site opens it: a ticket from POST /api/realtime/ticket,
+    then {"type": "auth", "ticket": ...} as the first frame. A client that can't get a ticket
+    (signed out, suspended) sends a dud, so the server refuses it as it would refuse that client."""
+    answer = client.post("/api/realtime/ticket")
+    ticket = answer.json().get("ticket") if answer.status_code == 200 else None
+    with client.websocket_connect("/api/ws", **kwargs) as ws:
+        ws.send_text(json.dumps({"type": "auth", "ticket": ticket or "no-ticket"}))
+        yield ws

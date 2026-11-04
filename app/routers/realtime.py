@@ -33,7 +33,9 @@ from dataclasses import dataclass, field
 
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from datetime import timedelta
+
+from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.websockets import WebSocketState
@@ -45,7 +47,8 @@ from app.errors import AppError
 from app.models import Conversation, User, utcnow
 from app.cookies import student_cookie
 from app.guard import allowed_origins
-from app.services import bans, chat, sessions
+from app.deps import DB, CurrentUser
+from app.services import bans, chat, limits, sessions
 
 log = logging.getLogger("app.realtime")
 router = APIRouter(tags=["realtime"])
@@ -59,6 +62,16 @@ MAX_BAD_FRAMES = 5
 # Closed when nothing at all arrives for this long (a live client pings every ~25 s).
 IDLE_SECONDS = 90
 MAX_SOCKETS_PER_USER = 10
+# The first frame must be {"type": "auth", "ticket": ...} within this long (see POST /realtime/ticket).
+AUTH_SECONDS = 5
+# How long a ticket from POST /realtime/ticket can be used (once).
+TICKET_SECONDS = 30
+# The server's own heartbeat: every HEARTBEAT_EVERY seconds it sends {"type": "heartbeat", "n"};
+# a client that hasn't answered {"type": "heartbeat.ack", "n"} within HEARTBEAT_GRACE is closed
+# (4408) even if it keeps sending other frames. Separate from the idle timeout, which only
+# notices silence.
+HEARTBEAT_EVERY = 30.0
+HEARTBEAT_GRACE = 20.0
 
 
 ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
@@ -131,8 +144,23 @@ class DeliveredFrame(BaseModel):
     conversation_id: ConversationId
 
 
-FRAME_MODELS: dict[str, type[BaseModel]] = {"ping": PingFrame, "typing": TypingFrame, "read": ReadFrame, "delivered": DeliveredFrame}
-Frame = PingFrame | TypingFrame | ReadFrame | DeliveredFrame
+class HeartbeatAckFrame(BaseModel):
+    model_config = _STRICT
+    type: Literal["heartbeat.ack"]
+    n: int = Field(ge=0, le=2**31)
+
+
+class AuthFrame(BaseModel):
+    """Only as the very first frame (the handshake); not accepted after it."""
+
+    model_config = _STRICT
+    type: Literal["auth"]
+    ticket: str = Field(min_length=1, max_length=2000)
+
+
+FRAME_MODELS: dict[str, type[BaseModel]] = {"ping": PingFrame, "typing": TypingFrame, "read": ReadFrame,
+                                            "delivered": DeliveredFrame, "heartbeat.ack": HeartbeatAckFrame}
+Frame = PingFrame | TypingFrame | ReadFrame | DeliveredFrame | HeartbeatAckFrame
 
 
 def parse_frame(raw: str) -> Frame:
@@ -152,6 +180,7 @@ FRAME_POLICY: dict[str, dict] = {
     "typing": {"roles": {"student"}, "object": "conversation: a participant", "writes": None},
     "read": {"roles": {"student"}, "object": "conversation: a participant", "writes": "own read receipt"},
     "delivered": {"roles": {"student"}, "object": "conversation: a participant", "writes": "own delivery receipt"},
+    "heartbeat.ack": {"roles": {"student"}, "object": None, "writes": None},
 }
 
 
@@ -209,44 +238,62 @@ def _heartbeat(token: str | None, user_id: str) -> bool:
     return True
 
 
-def _receipt(user_id: str, conversation_id: str, kind: str) -> bool:
-    """Marks the conversation read/delivered for this user. False (nothing done) unless they are a
-    participant right now, checked in the database on every frame."""
+def _counted(db, action: str, user_id: str) -> bool:
+    """One more write on the account's budget (the same counter the HTTP side uses). False when
+    over it."""
+    try:
+        limits.per_account(db, action, user_id)
+    except AppError as exc:
+        if exc.status == 429:
+            return False
+        raise
+    return True
+
+
+def _receipt(user_id: str, conversation_id: str, kind: str) -> str:
+    """Marks the conversation read/delivered for this user: "ok", "limited" (over the account's
+    receipt budget, shared with HTTP) or "forbidden" (not a participant right now, checked in the
+    database on every frame)."""
     with SessionLocal() as db:
+        if not _counted(db, "receipt", user_id):
+            return "limited"
         user = db.get(User, user_id)
         if user is None:
-            return False
+            return "forbidden"
         try:
             conv = chat.get_visible(db, conversation_id, user)
         except AppError:
-            return False
+            return "forbidden"
         if kind == "read":
             chat.mark_read(db, conv, user)
         else:
             chat.mark_delivered(db, conv, user.id)
         db.commit()
-        return True
+        return "ok"
 
 
-def _typing(user_id: str, conversation_id: str, typing: bool, send: bool = True) -> bool:
-    """Tells the other participants. False (nothing sent) unless this user is a participant right
-    now; the name shown is the one in the database now, not one remembered from the handshake."""
+def _typing(user_id: str, conversation_id: str, typing: bool, send: bool = True) -> str:
+    """Tells the other participants: "ok", "limited" (the account's typing budget, across all its
+    sockets) or "forbidden" (not a participant right now). The name shown is the one in the
+    database now, not one remembered from the handshake."""
     with SessionLocal() as db:
+        if not _counted(db, "typing", user_id):
+            return "limited"
         conv = db.get(Conversation, conversation_id)
         user = db.get(User, user_id)
         if conv is None or user is None:
-            return False
+            return "forbidden"
         people = [p.user_id for p in conv.participants]
         name = user.name
     if user_id not in people:
-        return False
+        return "forbidden"
     if not send:
-        return True  # allowed, but the others already know this state
+        return "ok"  # allowed, but the others already know this state
     realtime.publish_now(
         (p for p in people if p != user_id),
         {"type": "typing", "conversation_id": conversation_id, "user_id": user_id, "name": name, "typing": typing},
     )
-    return True
+    return "ok"
 
 
 def _origin_allowed(ws: WebSocket) -> bool:
@@ -268,6 +315,10 @@ class _State:
     last_heartbeat: float = field(default_factory=time.monotonic)
     typing_sent: dict[str, tuple[bool, float]] = field(default_factory=dict)
     bad_frames: int = 0
+    # The server's heartbeat: the number last sent and when, until it is acknowledged.
+    beat: int = 0
+    awaiting: int | None = None
+    awaiting_since: float = 0.0
 
 
 async def _bad_frame(ws: WebSocket, state: _State, conn: "realtime.Connection | None" = None) -> bool:
@@ -291,6 +342,11 @@ async def _handle(ws: WebSocket, conn: "realtime.Connection", frame: "Frame", st
         # session ended any way (even if its push was lost) can't act once more.
         await ws.close(code=4401, reason="Your session ended")
         return True
+    if kind == "heartbeat.ack":
+        if frame.n == state.awaiting:
+            state.awaiting = None
+            return False
+        return await _bad_frame(ws, state, conn)  # not the beat we sent: still unanswered
     if kind == "ping":
         conn.push({"type": "pong"})
         if time.monotonic() - state.last_heartbeat >= HEARTBEAT_SECONDS:
@@ -300,26 +356,86 @@ async def _handle(ws: WebSocket, conn: "realtime.Connection", frame: "Frame", st
                 return True
         return False
     if kind in ("read", "delivered"):
-        if not await run_in_threadpool(_receipt, state.user_id, conversation_id, kind):
-            _forbidden(conn, kind)
+        result = await run_in_threadpool(_receipt, state.user_id, conversation_id, kind)
+        if result != "ok":
+            _refused(conn, kind, result)
     elif kind == "typing":
         typing = bool(frame.typing)
         previous = state.typing_sent.get(conversation_id)
         now = time.monotonic()
         # The same state again within a moment isn't passed on, but it is still authorized.
         repeat = bool(previous and previous[0] == typing and now - previous[1] < TYPING_REPEAT_SECONDS)
-        if not await run_in_threadpool(_typing, state.user_id, conversation_id, typing, not repeat):
+        result = await run_in_threadpool(_typing, state.user_id, conversation_id, typing, not repeat)
+        if result != "ok":
             state.typing_sent.pop(conversation_id, None)
-            _forbidden(conn, kind)
+            _refused(conn, kind, result)
             return False
         if not repeat:
             state.typing_sent[conversation_id] = (typing, now)
     return False
 
 
-def _forbidden(conn: "realtime.Connection", kind: str) -> None:
-    """Not a participant (or no such conversation: the same answer, so ids can't be probed)."""
-    conn.push({"type": "error", "for": kind, "code": "forbidden"})
+def _refused(conn: "realtime.Connection", kind: str, why: str) -> None:
+    """"forbidden": not a participant (or no such conversation: the same answer, so ids can't be
+    probed). "rate_limited": over the account's budget for that action."""
+    conn.push({"type": "error", "for": kind, "code": "rate_limited" if why == "limited" else "forbidden"})
+
+
+async def _heartbeat_loop(ws: WebSocket, conn: "realtime.Connection", state: _State) -> None:
+    """Sends a numbered heartbeat every HEARTBEAT_EVERY seconds and closes the socket (4408) if
+    one goes unanswered for HEARTBEAT_GRACE: a client that is connected but no longer working
+    (frozen tab, stuck reader) is let go, even if it still sends other frames."""
+    tick = max(0.05, min(HEARTBEAT_EVERY, HEARTBEAT_GRACE) / 3)
+    sent_at = time.monotonic()
+    while True:
+        await asyncio.sleep(tick)
+        now = time.monotonic()
+        if state.awaiting is not None:
+            if now - state.awaiting_since > HEARTBEAT_GRACE:
+                conn.close(4408, "No answer to the heartbeat")
+                return
+        elif now - sent_at >= HEARTBEAT_EVERY:
+            state.beat += 1
+            state.awaiting, state.awaiting_since, sent_at = state.beat, now, now
+            conn.push({"type": "heartbeat", "n": state.beat})
+
+
+def _ticket_ok(ticket: str, user_id: str, session_id: str) -> bool:
+    with SessionLocal() as db:
+        ok = sessions.spend_ticket(db, ticket, user_id, session_id)
+        db.commit()
+        return ok
+
+
+async def _handshake(ws: WebSocket, user_id: str, session_id: str) -> bool:
+    """The first frame must be {"type": "auth", "ticket": ...} with a live ticket of this student
+    and this session. The cookie alone is not enough: it is the one thing a cross-site page could
+    make the browser send."""
+    try:
+        message = await asyncio.wait_for(ws.receive(), timeout=AUTH_SECONDS)
+        raw = message.get("text")
+        if raw is None or len(raw) > MAX_CLIENT_MESSAGE or _too_deep(raw):
+            return False
+        data = json.loads(raw, object_pairs_hook=_no_duplicates, parse_constant=_no_constants)
+        frame = AuthFrame.model_validate(data)
+    except (TimeoutError, ValueError, ValidationError, RecursionError, KeyError):
+        return False
+    return await run_in_threadpool(_ticket_ok, frame.ticket, user_id, session_id)
+
+
+class TicketOut(BaseModel):
+    ticket: str
+
+
+@router.post("/realtime/ticket", response_model=TicketOut)
+def socket_ticket(request: Request, db: DB, user: CurrentUser):
+    """A ticket for opening the live socket: send it as the first frame, within TICKET_SECONDS.
+    Single use, only for this session. (Cross-site pages can't get one: this needs the session,
+    the request guard refuses other origins, and CORS hides the answer from them.)"""
+    limits.per_account(db, "ws_ticket", user.id)
+    ticket = sessions.issue_ticket(db, user.id, user.password_hash, request.state.session_id, timedelta(seconds=TICKET_SECONDS))
+    db.commit()
+    return {"ticket": ticket}
 
 
 @router.websocket("/ws")
@@ -334,6 +450,9 @@ async def socket(ws: WebSocket):
         await ws.close(code=4401, reason="Sign in to continue")
         return
     user_id, name, session_id = who
+    if not await _handshake(ws, user_id, session_id):
+        await ws.close(code=4401, reason="Sign in to continue")
+        return
     await run_in_threadpool(realtime.ensure_listener)
 
     conn = realtime.Connection(ws, user_id, name, session_id)
@@ -347,6 +466,7 @@ async def socket(ws: WebSocket):
         await run_in_threadpool(_presence, user_id, True)
 
     state = _State(token=token, user_id=user_id, name=name)
+    beats = asyncio.create_task(_heartbeat_loop(ws, conn, state))
     recent: list[float] = []
     try:
         while True:
@@ -395,6 +515,7 @@ async def socket(ws: WebSocket):
         log.exception("realtime socket of %s failed", user_id)
     finally:
         pump.cancel()
+        beats.cancel()
         if realtime.hub.remove(conn):
             # Whoever they were typing to should not see "typing…" linger.
             for conversation_id, (typing, _) in state.typing_sent.items():

@@ -18,6 +18,7 @@ from app.models import ConversationParticipant
 from app.routers import realtime as ws_routes
 from tests.attacks.ws_tools import ErrorRecorder, closed_code, drain, frames_until, open_socket
 from tests.conftest import PASSWORD, PHONES
+from tests.conftest import ws_connect
 
 LEAD = "usr_1"
 
@@ -119,7 +120,8 @@ def test_receipts_racing_from_many_sockets_settle_once(as_user):
     assert other.post("/api/conversations/conv_2/messages", json={"text": "race me"}).status_code == 201
     lead = as_user(LEAD)
     with ErrorRecorder() as errors:
-        sockets = [lead.websocket_connect("/api/ws").__enter__() for _ in range(6)]
+        managers = [ws_connect(lead) for _ in range(6)]
+        sockets = [m.__enter__() for m in managers]
         try:
             for ws in sockets:
                 frames_until(ws, "hello")
@@ -140,8 +142,8 @@ def test_receipts_racing_from_many_sockets_settle_once(as_user):
                 seen = frames_until(ws, "pong", timeout=10)
                 assert not [e for e in seen if e["type"] == "error"], seen
         finally:
-            for ws in sockets:
-                ws.__exit__(None, None, None)
+            for m in managers:
+                m.__exit__(None, None, None)
     assert errors.records == []
     with SessionLocal() as db:
         row = db.scalar(select(ConversationParticipant).where(ConversationParticipant.conversation_id == "conv_2",
@@ -152,7 +154,7 @@ def test_receipts_racing_from_many_sockets_settle_once(as_user):
 def test_no_seat_join_or_request_action_exists_on_the_socket():
     """Accepts, joins, invitations and messages are HTTP only (with their own row locks and unique
     indexes, tests/attacks/test_races.py); the socket can only touch its own receipts."""
-    assert set(ws_routes.FRAME_MODELS) == {"ping", "typing", "read", "delivered"}
+    assert set(ws_routes.FRAME_MODELS) == {"ping", "typing", "read", "delivered", "heartbeat.ack"}
 
 
 # --- Not on this socket: sign-in, OTP, GraphQL ---------------------------------------------------

@@ -7,6 +7,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from app.main import app
 from tests.conftest import ADMIN_PASSWORD, PASSWORD, PHONES
+from tests.conftest import ws_connect
 
 LEAD, MEMBER, LOOKING, OTHER_LOOKING = "usr_1", "usr_9", "usr_6", "usr_8"
 
@@ -114,7 +115,7 @@ def test_suspend_and_lift(admin_client, as_user):
 def test_suspended_student_socket_is_refused(admin_client, as_user):
     student = as_user(LEAD)
     admin_client().post(f"/api/admin/users/{LEAD}/ban", json={})
-    with student.websocket_connect("/api/ws") as ws:
+    with ws_connect(student) as ws:
         with pytest.raises(WebSocketDisconnect) as closed:
             ws.receive_json()
     assert closed.value.code == 4401
@@ -123,7 +124,7 @@ def test_suspended_student_socket_is_refused(admin_client, as_user):
 @pytest.mark.parametrize("action", ["ban", "block", "password", "delete"])
 def test_admin_actions_sign_open_tabs_out_at_once(admin_client, as_user, action):
     student, admin = as_user(OTHER_LOOKING), admin_client()
-    with student.websocket_connect("/api/ws") as ws:
+    with ws_connect(student) as ws:
         assert ws.receive_json()["type"] == "hello"
         if action == "ban":
             admin.post(f"/api/admin/users/{OTHER_LOOKING}/ban", json={"reason": "spam"})

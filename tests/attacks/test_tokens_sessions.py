@@ -17,6 +17,7 @@ from app.models import AdminUser, AuthSession, User
 from app.security import AUDIENCES, fingerprint
 from app.services import sessions
 from tests.conftest import ADMIN_PASSWORD, PASSWORD, PHONES
+from tests.conftest import ws_connect
 
 LEAD = "usr_1"
 
@@ -248,7 +249,7 @@ def test_stolen_cookie_can_not_open_the_socket_after_logout(as_user):
     victim.post("/api/auth/logout")
     thief = TestClient(app)
     thief.cookies.set(get_settings().cookie_name, stolen)
-    with thief.websocket_connect("/api/ws") as ws:
+    with ws_connect(thief) as ws:
         with pytest.raises(WebSocketDisconnect) as closed:
             ws.receive_json()
     assert closed.value.code == 4401

@@ -337,3 +337,30 @@ def test_uvicorn_coloured_lines_still_show_their_values():
     finally:
         logger.removeHandler(handler)
     assert "[1234]" in stream.getvalue() and "%d" not in stream.getvalue()
+
+
+def test_uvicorn_access_lines_format_and_are_cleaned():
+    """The access formatter unpacks record.args: the filter must keep them (cleaned), not drop
+    them (that printed a "--- Logging error ---" traceback for every request)."""
+    import logging
+    import sys
+
+    from uvicorn.logging import AccessFormatter
+
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(AccessFormatter('%(client_addr)s - "%(request_line)s" %(status_code)s', use_colors=False))
+    handler.addFilter(log_safety.SafeLogFilter())
+    logger = logging.getLogger("uvicorn.access")
+    logger.addHandler(handler)
+    errors = io.StringIO()
+    old_stderr, sys.stderr = sys.stderr, errors
+    try:
+        logger.info('%s - "%s %s HTTP/%s" %d', "127.0.0.1:5000", "GET", "/api/x\r\nFAKE 200\x1b[31m", "1.1", 200)
+    finally:
+        sys.stderr = old_stderr
+        logger.removeHandler(handler)
+    line = stream.getvalue()
+    assert "Logging error" not in errors.getvalue(), errors.getvalue()[:300]
+    assert line.count("\n") == 1 and "\x1b" not in line and "\r" not in line
+    assert "/api/x\\r\\nFAKE" in line and line.rstrip().endswith("200 OK")

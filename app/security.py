@@ -56,7 +56,8 @@ def e164(phone_normalized: str) -> str:
 # ---------------------------------------------------------------------------------------------
 
 ALGORITHM = "HS256"
-AUDIENCES = {"student": "capstoneconnect:student", "admin": "capstoneconnect:admin", "reset": "capstoneconnect:reset"}
+AUDIENCES = {"student": "capstoneconnect:student", "admin": "capstoneconnect:admin", "reset": "capstoneconnect:reset",
+             "ws": "capstoneconnect:ws"}
 REQUIRED_CLAIMS = ["exp", "iat", "iss", "aud", "sub", "sid", "kind"]
 LEEWAY_SECONDS = 30
 
@@ -65,10 +66,12 @@ def fingerprint(password_hash: str) -> str:
     return hashlib.sha256(password_hash.encode()).hexdigest()[:16]
 
 
-def encode_token(kind: str, subject_id: str, session_id: str, password_hash: str, lifetime: timedelta) -> str:
+def encode_token(kind: str, subject_id: str, session_id: str, password_hash: str, lifetime: timedelta,
+                 extra: dict | None = None) -> str:
     settings = get_settings()
     now = datetime.now(UTC)
     claims = {
+        **(extra or {}),
         "iss": settings.jwt_issuer, "aud": AUDIENCES[kind], "sub": subject_id, "sid": session_id,
         "kind": kind, "pv": fingerprint(password_hash), "iat": now, "exp": now + lifetime,
     }

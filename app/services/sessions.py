@@ -24,7 +24,7 @@ from app import realtime
 from app.models import AuthSession
 from app.security import decode_token, encode_token, token_matches_password
 
-KINDS = ("student", "admin", "reset")
+KINDS = ("student", "admin", "reset", "ws")
 
 
 def _now() -> datetime:
@@ -32,7 +32,7 @@ def _now() -> datetime:
 
 
 def start(db: Session, kind: str, subject_id: str, password_hash: str, lifetime: timedelta,
-          request: Request | None = None) -> str:
+          request: Request | None = None, extra: dict | None = None) -> str:
     """A new session row and the signed token naming it. The caller commits."""
     assert kind in KINDS
     sid = f"ses_{secrets.token_hex(16)}"
@@ -41,7 +41,7 @@ def start(db: Session, kind: str, subject_id: str, password_hash: str, lifetime:
     if random.random() < 0.01:
         # Expired rows are useless: drop them now and then.
         db.execute(delete(AuthSession).where(AuthSession.expires_at < _now() - timedelta(days=1)))
-    return encode_token(kind, subject_id, sid, password_hash, lifetime)
+    return encode_token(kind, subject_id, sid, password_hash, lifetime, extra)
 
 
 def resolve(db: Session, token: str | None, kind: str) -> tuple[str, str, str] | None:
@@ -119,3 +119,30 @@ def spend_reset(db: Session, token: str) -> tuple[str, str] | None:
         return None
     row = db.execute(_SPEND, {"sid": claims["sid"], "sub": claims["sub"]}).first()
     return (claims["sub"], str(claims.get("pv", ""))) if row else None
+
+
+# ---------------------------------------------------------------------------------------------
+# Socket tickets: what a page sends as the first frame of the live socket, besides its cookie.
+# A cookie alone is what a cross-site page could also make the browser send; a ticket comes
+# from POST /realtime/ticket, whose answer only this site's pages can read (CORS) and which the
+# request guard refuses from other origins. A ticket lives seconds, works once, and only for the
+# session (and student) it was issued to.
+# ---------------------------------------------------------------------------------------------
+
+_SPEND_TICKET = text(
+    "UPDATE auth_sessions SET revoked_at = now() "
+    "WHERE id = :sid AND kind = 'ws' AND subject_id = :sub AND revoked_at IS NULL AND expires_at > now() "
+    "RETURNING id"
+)
+
+
+def issue_ticket(db: Session, user_id: str, password_hash: str, session_id: str, lifetime: timedelta) -> str:
+    return start(db, "ws", user_id, password_hash, lifetime, extra={"psid": session_id})
+
+
+def spend_ticket(db: Session, ticket: str, user_id: str, session_id: str) -> bool:
+    """True once for a live ticket of this student and this session (spent atomically)."""
+    claims = decode_token(ticket, "ws")
+    if claims is None or claims["sub"] != user_id or claims.get("psid") != session_id:
+        return False
+    return db.execute(_SPEND_TICKET, {"sid": claims["sid"], "sub": user_id}).first() is not None

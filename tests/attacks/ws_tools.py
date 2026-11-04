@@ -55,8 +55,10 @@ def closed_code(ws, timeout: float = 5.0) -> int | None:
 
 @contextmanager
 def open_socket(client, **kwargs):
-    """A signed-in socket, past its hello (the way the site opens it)."""
-    with client.websocket_connect("/api/ws", **kwargs) as ws:
+    """A signed-in socket, past its hello (the way the site opens it: ticket, then auth frame)."""
+    from tests.conftest import ws_connect
+
+    with ws_connect(client, **kwargs) as ws:
         hello = receive(ws)
         assert hello["type"] == "hello", hello
         yield ws

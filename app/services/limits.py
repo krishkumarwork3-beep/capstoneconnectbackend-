@@ -120,6 +120,11 @@ WRITE_LIMITS: dict[str, tuple[int, timedelta]] = {
     "upload": (30, timedelta(hours=1)),
     "report": (20, timedelta(hours=1)),
     "github_lookup": (30, timedelta(minutes=10)),  # per account or, signed out, per IP address
+    # Shared by HTTP (POST /conversations/{id}/read) and the socket's read/delivered frames.
+    "receipt": (120, timedelta(minutes=1)),
+    # Socket only, but per account: ten sockets don't get ten times the budget.
+    "typing": (60, timedelta(minutes=1)),
+    "ws_ticket": (60, timedelta(minutes=10)),
 }
 
 

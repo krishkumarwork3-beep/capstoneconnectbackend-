@@ -72,6 +72,11 @@ def clean(message: str) -> str:
 
 class SafeLogFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
+        if record.name == "uvicorn.access" and isinstance(record.args, tuple):
+            # uvicorn's access formatter unpacks the arguments (client, method, path, version,
+            # status): each is cleaned where it stands instead of being folded into the message.
+            record.args = tuple(clean(a) if isinstance(a, str) else a for a in record.args)
+            return True
         try:
             record.msg = clean(record.getMessage())
             record.args = None

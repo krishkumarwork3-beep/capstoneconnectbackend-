@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from app.config import DEV_SECRET_KEY, Settings, get_settings
 from app.main import app
 from tests.conftest import PASSWORD, PHONES
+from tests.conftest import ws_connect
 
 ROOT = Path(__file__).resolve().parent.parent
 OTHER = "usr_8"
@@ -230,7 +231,7 @@ def test_cookie_attributes_for_each_layout(monkeypatch, layout, settings, expect
     assert name == (f"__Host-{s.cookie_name}" if settings.get("cookie_secure") and not settings.get("cookie_domain") else s.cookie_name), layout
     ws_client = TestClient(app)
     ws_client.cookies.set(name, token)
-    with ws_client.websocket_connect("/api/ws") as ws:
+    with ws_connect(ws_client) as ws:
         assert ws.receive_json()["type"] == "hello"
     # Logging out clears it with the same attributes.
     out = client.post("/api/auth/logout").headers["set-cookie"].lower()

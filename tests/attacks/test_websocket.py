@@ -9,6 +9,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from app.main import app
 from app.routers import realtime as ws_routes
+from tests.conftest import ws_connect
 
 
 def _closed_with(ws) -> int:
@@ -23,14 +24,14 @@ def _hello(ws):
 
 
 def test_oversized_frame_closes_the_socket(as_user):
-    with as_user("usr_8").websocket_connect("/api/ws") as ws:
+    with ws_connect(as_user("usr_8")) as ws:
         _hello(ws)
         ws.send_text('{"type":"ping","pad":"' + "x" * 5000 + '"}')
         assert _closed_with(ws) == 1009
 
 
 def test_binary_frame_closes_the_socket(as_user):
-    with as_user("usr_8").websocket_connect("/api/ws") as ws:
+    with ws_connect(as_user("usr_8")) as ws:
         _hello(ws)
         ws.send_bytes(b"\x00\x01\x02 binary")
         assert _closed_with(ws) == 1003
@@ -40,7 +41,7 @@ def test_binary_frame_closes_the_socket(as_user):
                                    '{"type":"typing","conversation_id":{"$ne":null}}', '{"type":"typing","conversation_id":"conv_1","typing":"yes"}',
                                    '{"type":"read"}', '{"type":"read","conversation_id":"' + "c" * 100 + '"}', '{"__proto__":{"x":1},"type":"ping"}'])
 def test_malformed_frames_are_ignored_then_close_the_socket(as_user, frame):
-    with as_user("usr_8").websocket_connect("/api/ws") as ws:
+    with ws_connect(as_user("usr_8")) as ws:
         _hello(ws)
         ws.send_text(frame)
         ws.send_json({"type": "ping"})
@@ -53,7 +54,7 @@ def test_malformed_frames_are_ignored_then_close_the_socket(as_user, frame):
 
 
 def test_flooding_closes_the_socket(as_user):
-    with as_user("usr_8").websocket_connect("/api/ws") as ws:
+    with ws_connect(as_user("usr_8")) as ws:
         _hello(ws)
         for _ in range(ws_routes.RATE_FRAMES + 5):
             ws.send_json({"type": "ping"})
@@ -71,7 +72,7 @@ def test_cross_origin_sockets_are_refused(as_user, origin):
 
 
 def test_the_site_origin_is_accepted(as_user):
-    with as_user("usr_8").websocket_connect("/api/ws", headers={"Origin": "http://localhost:3000"}) as ws:
+    with ws_connect(as_user("usr_8"), headers={"Origin": "http://localhost:3000"}) as ws:
         _hello(ws)
 
 
@@ -80,11 +81,11 @@ def test_too_many_sockets_for_one_account(as_user, monkeypatch):
     c = as_user("usr_8")
     with ExitStack() as stack:
         for _ in range(3):
-            _hello(stack.enter_context(c.websocket_connect("/api/ws")))
-        with c.websocket_connect("/api/ws") as extra:
+            _hello(stack.enter_context(ws_connect(c)))
+        with ws_connect(c) as extra:
             assert _closed_with(extra) == 1008
     # Once they close, a new one is fine again.
-    with c.websocket_connect("/api/ws") as ws:
+    with ws_connect(c) as ws:
         _hello(ws)
 
 
@@ -92,19 +93,19 @@ def test_total_socket_cap(as_user, monkeypatch):
     from app.config import get_settings
 
     monkeypatch.setattr(get_settings(), "ws_max_sockets", 1)
-    with as_user("usr_8").websocket_connect("/api/ws") as first:
+    with ws_connect(as_user("usr_8")) as first:
         _hello(first)
-        with as_user("usr_1").websocket_connect("/api/ws") as second:
+        with ws_connect(as_user("usr_1")) as second:
             assert _closed_with(second) == 1008
 
 
 def test_idle_sockets_are_closed(as_user, monkeypatch):
     monkeypatch.setattr(ws_routes, "IDLE_SECONDS", 0.3)
-    with as_user("usr_8").websocket_connect("/api/ws") as ws:
+    with ws_connect(as_user("usr_8")) as ws:
         _hello(ws)
         assert _closed_with(ws) == 4408
 
 
 def test_no_cookie_no_socket():
-    with TestClient(app).websocket_connect("/api/ws") as ws:
+    with ws_connect(TestClient(app)) as ws:
         assert _closed_with(ws) == 4401

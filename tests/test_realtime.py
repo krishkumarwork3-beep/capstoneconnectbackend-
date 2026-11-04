@@ -9,6 +9,8 @@ import anyio
 import pytest
 from starlette.websockets import WebSocketDisconnect
 
+from tests.conftest import ws_connect
+
 GROUP_CHAT_MEMBERS = ("usr_1", "usr_9")  # both in grp_1
 
 
@@ -42,7 +44,7 @@ def group_chat(client) -> str:
 
 
 def test_needs_a_session(client):
-    with client.websocket_connect("/api/ws") as ws:
+    with ws_connect(client) as ws:
         with pytest.raises(WebSocketDisconnect) as closed:
             receive(ws)
     assert closed.value.code == 4401
@@ -58,7 +60,7 @@ def test_refuses_a_foreign_origin(as_user):
 def test_message_reaches_every_participant_with_ticks(as_user):
     lead, member = (as_user(u) for u in GROUP_CHAT_MEMBERS)
     conv_id = group_chat(lead)
-    with lead.websocket_connect("/api/ws") as lead_ws, member.websocket_connect("/api/ws") as member_ws:
+    with ws_connect(lead) as lead_ws, ws_connect(member) as member_ws:
         assert wait_for(lead_ws, "hello")["user_id"] == "usr_1"
         wait_for(member_ws, "hello")
 
@@ -90,7 +92,7 @@ def test_reading_again_says_nothing(as_user):
     lead, member = (as_user(u) for u in GROUP_CHAT_MEMBERS)
     conv_id = group_chat(lead)
     member.post(f"/api/conversations/{conv_id}/read")
-    with lead.websocket_connect("/api/ws") as lead_ws:
+    with ws_connect(lead) as lead_ws:
         wait_for(lead_ws, "hello")
         member.post(f"/api/conversations/{conv_id}/read")
         nothing_like(lead_ws, "read")
@@ -100,7 +102,7 @@ def test_a_long_message_still_arrives(as_user):
     lead, member = (as_user(u) for u in GROUP_CHAT_MEMBERS)
     conv_id = group_chat(lead)
     text = "🚀" * 4000  # far over the 8000-byte NOTIFY limit, so it goes by reference
-    with member.websocket_connect("/api/ws") as ws:
+    with ws_connect(member) as ws:
         wait_for(ws, "hello")
         lead.post(f"/api/conversations/{conv_id}/messages", json={"text": text, "client_id": "long"})
         got = wait_for(ws, "message.new")["message"]
@@ -110,9 +112,9 @@ def test_a_long_message_still_arrives(as_user):
 def test_typing_goes_to_the_others_only(as_user):
     lead, member = (as_user(u) for u in GROUP_CHAT_MEMBERS)
     conv_id = group_chat(lead)
-    with lead.websocket_connect("/api/ws") as lead_ws:
+    with ws_connect(lead) as lead_ws:
         wait_for(lead_ws, "hello")
-        with member.websocket_connect("/api/ws") as member_ws:
+        with ws_connect(member) as member_ws:
             wait_for(member_ws, "hello")
             member_ws.send_json({"type": "typing", "conversation_id": conv_id, "typing": True})
             event = wait_for(lead_ws, "typing", conversation_id=conv_id)
@@ -125,7 +127,7 @@ def test_typing_goes_to_the_others_only(as_user):
 def test_typing_into_someone_elses_chat_is_ignored(as_user):
     lead, outsider = as_user("usr_1"), as_user("usr_8")
     conv_id = group_chat(lead)
-    with lead.websocket_connect("/api/ws") as lead_ws, outsider.websocket_connect("/api/ws") as outsider_ws:
+    with ws_connect(lead) as lead_ws, ws_connect(outsider) as outsider_ws:
         wait_for(lead_ws, "hello")
         wait_for(outsider_ws, "hello")
         outsider_ws.send_json({"type": "typing", "conversation_id": conv_id, "typing": True})
@@ -134,9 +136,9 @@ def test_typing_into_someone_elses_chat_is_ignored(as_user):
 
 def test_presence_online_and_offline(as_user):
     lead, member = (as_user(u) for u in GROUP_CHAT_MEMBERS)
-    with lead.websocket_connect("/api/ws") as lead_ws:
+    with ws_connect(lead) as lead_ws:
         wait_for(lead_ws, "hello")
-        with member.websocket_connect("/api/ws") as member_ws:
+        with ws_connect(member) as member_ws:
             wait_for(member_ws, "hello")
             assert wait_for(lead_ws, "presence", user_id="usr_9")["online"] is True
         assert wait_for(lead_ws, "presence", user_id="usr_9")["online"] is False
@@ -145,7 +147,7 @@ def test_presence_online_and_offline(as_user):
 def test_joining_a_group_shows_its_chat_live(as_user):
     lead, newcomer = as_user("usr_1"), as_user("usr_6")
     request = next(r for r in lead.get("/api/requests?direction=received").json() if r["sender_id"] == "usr_6")
-    with newcomer.websocket_connect("/api/ws") as ws:
+    with ws_connect(newcomer) as ws:
         wait_for(ws, "hello")
         assert lead.patch(f"/api/requests/{request['id']}", json={"status": "accepted"}).status_code == 200
         wait_for(ws, "conversations.changed")
@@ -153,7 +155,7 @@ def test_joining_a_group_shows_its_chat_live(as_user):
 
 
 def test_ping_pong(as_user):
-    with as_user("usr_1").websocket_connect("/api/ws") as ws:
+    with ws_connect(as_user("usr_1")) as ws:
         wait_for(ws, "hello")
         ws.send_json({"type": "ping"})
         wait_for(ws, "pong")

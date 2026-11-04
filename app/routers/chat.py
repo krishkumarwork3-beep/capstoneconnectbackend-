@@ -86,6 +86,7 @@ def send(conversation_id: PathId, payload: schemas.SendMessageIn, response: Resp
 
 @router.post("/conversations/{conversation_id}/read", status_code=204)
 def mark_read(conversation_id: PathId, db: DB, user: CurrentUser):
+    write_limits.per_account(db, "receipt", user.id)  # one budget with the socket's receipts
     chat.mark_read(db, chat.get_visible(db, conversation_id, user), user)
     db.commit()
 
