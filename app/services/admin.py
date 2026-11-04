@@ -6,8 +6,6 @@ password signs that admin out everywhere; deactivating an admin does the same on
 """
 
 import logging
-import threading
-import time
 from collections.abc import Iterable
 
 from sqlalchemy import func, select
@@ -34,47 +32,35 @@ from app.models import (
     utcnow,
 )
 from app.security import hash_password, new_id, normalize_phone, verify_password
-from app.services import chat
+from app.services import chat, lockout, sessions
 from app.services import groups as rules
 
 log = logging.getLogger("app.admin")
 
 # ---------------------------------------------------------------------------------------------
-# Sign-in, with a short lock-out after repeated failures (per email, in this process).
+# Sign-in, with the per-account lock-out and back-off shared with students (app.services.lockout).
 # ---------------------------------------------------------------------------------------------
 
-MAX_FAILURES = 5
-LOCKOUT_SECONDS = 120
-_failures: dict[str, list[float]] = {}
-_failures_lock = threading.Lock()
-
-
-def _recent_failures(email: str, now: float) -> list[float]:
-    return [t for t in _failures.get(email, []) if now - t < LOCKOUT_SECONDS]
+_DUMMY_HASH = hash_password("not-a-real-admin-password-for-timing")
 
 
 def authenticate(db: Session, email: str, password: str) -> AdminUser:
     email = email.strip().lower()
-    now = time.monotonic()
-    with _failures_lock:
-        recent = _recent_failures(email, now)
-        if len(recent) >= MAX_FAILURES:
-            wait = int(LOCKOUT_SECONDS - (now - recent[0])) + 1
-            raise AppError(f"Too many attempts. Try again in {wait} seconds.", 429)
+    account = lockout.admin_key(email)
+    lockout.check(db, account)
     admin = db.scalar(select(AdminUser).where(AdminUser.email == email))
-    if admin is None or not admin.active or not verify_password(password, admin.password_hash):
-        with _failures_lock:
-            _failures[email] = [*_recent_failures(email, now), now]
+    # A missing account takes as long as a wrong password (no timing hint about which emails exist).
+    password_ok = verify_password(password, admin.password_hash if admin else _DUMMY_HASH)
+    if admin is None or not admin.active or not password_ok:
+        lockout.fail(db, account)
         raise AppError("Wrong email or password", 401)
-    with _failures_lock:
-        _failures.pop(email, None)
+    lockout.succeed(db, account)
     admin.last_login_at = utcnow()
     return admin
 
 
 def reset_lockouts() -> None:
-    with _failures_lock:
-        _failures.clear()
+    """Kept for callers from before lock-outs moved to the database (the table is cleared instead)."""
 
 
 def create_admin(db: Session, email: str, name: str, password: str, role: str = "admin") -> AdminUser:
@@ -203,9 +189,11 @@ def check_phone_free(db: Session, phone_normalized: str, except_user: str | None
 
 
 def end_sessions(db: Session, user_ids: Iterable[str]) -> None:
-    """Their open tabs are told at once (when `db` commits) that they are signed out; the API
-    already refuses their session from the next request on."""
-    realtime.publish(db, user_ids, {"type": "session.ended"})
+    """Revokes every session (and reset grant) of these students, and tells their open tabs at
+    once (when `db` commits) that they are signed out."""
+    ids = list(user_ids)
+    sessions.end_everything(db, "student", ids)
+    realtime.publish(db, ids, {"type": "session.ended"})
 
 
 def ban(db: Session, user: User, reason: str) -> None:

@@ -3,12 +3,13 @@
 import logging
 import os
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from app.services import limits as write_limits
 from app import schemas
-from app.deps import DB, CurrentUser
+from app.deps import DB, CurrentUser, OptionalUser
 from app.config import get_settings
 from app.errors import AppError
 from app.models import utcnow
@@ -40,8 +41,10 @@ def presence(db: DB, user: CurrentUser):
 
 
 @router.get("/github/verify", response_model=schemas.GitHubLookupOut)
-async def verify_github(username: str = Query(min_length=1, max_length=100)):
+async def verify_github(request: Request, db: DB, user: OptionalUser, username: str = Query(min_length=1, max_length=100)):
     """Public (used during sign-up): does this GitHub user exist, and their all-time contributions."""
+    # Each lookup fans out to many GitHub requests: limited per account, or per address when signed out.
+    write_limits.per_account(db, "github_lookup", user.id if user else f"ip:{write_limits.client_ip(request)}")
     name = github.username_from(username)
     if name is None:
         return {"valid": False, "username": username.strip()}
@@ -52,7 +55,7 @@ async def verify_github(username: str = Query(min_length=1, max_length=100)):
     if result is None:
         return {"valid": False, "username": name}
     profile, total = result
-    return {"valid": True, "username": profile["login"], "contribution_count": total}
+    return {"valid": True, "username": github._login(profile, name), "contribution_count": total}
 
 
 @router.get("/health")

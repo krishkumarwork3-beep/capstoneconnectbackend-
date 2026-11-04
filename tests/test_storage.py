@@ -14,8 +14,8 @@ from app.main import app
 from app.services import storage as storage_module
 
 LEAD, MEMBER, OTHER = "usr_1", "usr_9", "usr_8"
-PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
-PDF = b"%PDF-1.4\n" + b"1" * 64
+PNG = __import__("tests.conftest", fromlist=["REAL_PNG"]).REAL_PNG  # a real 8x8 image (uploads are re-encoded)
+PDF = b"%PDF-1.4\n" + b"1" * 64 + b"\n%%EOF\n"
 ROOT = Path(__file__).resolve().parent.parent
 
 

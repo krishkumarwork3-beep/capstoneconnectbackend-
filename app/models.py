@@ -19,6 +19,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text as sql_text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -191,6 +192,37 @@ class Announcement(Base):
     updated_at: Mapped[datetime] = _now_column(onupdate=utcnow)
 
 
+class AuthSession(Base):
+    """One sign-in (a student's or an admin's) or one password-reset grant. The signed cookie only
+    names its row (`sid`): logging out, "sign out everywhere", a password change, a suspension or
+    a deletion sets `revoked_at`, and the cookie stops working on the very next request, even if
+    someone copied it. Reset grants are spent by setting `revoked_at` (single use)."""
+
+    __tablename__ = "auth_sessions"
+    __table_args__ = (Index("ix_auth_sessions_subject", "kind", "subject_id"),)
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16))  # student | admin | reset
+    subject_id: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = _now_column()
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+
+class LoginLockout(Base):
+    """Consecutive failed sign-ins for one account (a normalised phone number or an admin email,
+    whether or not it exists) and how long it is locked: 15 minutes after the fifth failure,
+    doubling with each further one, up to a day. A successful sign-in clears it."""
+
+    __tablename__ = "login_lockouts"
+
+    key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    failures: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = _now_column()
+
+
 class RateLimit(Base):
     """A fixed-window counter for sign-in, sign-up and password-reset throttling (app.services.limits).
     Kept in PostgreSQL so every worker counts together."""
@@ -259,6 +291,10 @@ class Message(Base):
     __table_args__ = (
         Index("ix_messages_conversation_created", "conversation_id", "created_at"),
         Index("ix_messages_sender", "sender_id"),
+        # A retry of the same send (same sender, same client_id) is one message, even at the same moment.
+        Index("uq_messages_sender_client", "sender_id", "client_id", unique=True, postgresql_where=sql_text("client_id IS NOT NULL")),
+        # An uploaded file is sent once: its readers are that one conversation's participants.
+        Index("uq_messages_attachment", "attachment_url", unique=True, postgresql_where=sql_text("attachment_url IS NOT NULL")),
     )
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True)
@@ -269,6 +305,7 @@ class Message(Base):
     attachment_name: Mapped[str | None] = mapped_column(String(255))
     attachment_url: Mapped[str | None] = mapped_column(String(500))
     attachment_size: Mapped[int | None] = mapped_column(Integer)
+    client_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = _now_column()
 
 

@@ -10,15 +10,19 @@ import io
 from datetime import timedelta
 from typing import Literal
 
-from fastapi import APIRouter, Query, Response
+from typing import Annotated
+
+from fastapi import APIRouter, Path as PathParam, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import Date, cast, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
+from app import search as like_text
+from app.links import csv_cell
 from app import admin_schemas as s
 from app.config import get_settings
-from app.cookies import clear_session_cookie, set_session_cookie
-from app.deps import DB, AdminWriter, CurrentAdmin
+from app.cookies import admin_cookie, clear_session_cookie, set_session_cookie
+from app.deps import PathId, DB, AdminWriter, CurrentAdmin
 from app.errors import AppError, not_found
 from app.models import (
     AdminUser,
@@ -35,7 +39,8 @@ from app.models import (
     User,
     utcnow,
 )
-from app.security import create_admin_token, hash_password, new_id, normalize_phone, verify_password
+from app.security import hash_password, new_id, normalize_phone, verify_password
+from app.services import sessions
 from app.passwords import ensure_good_password
 from app.services import admin as ops
 from app.services import github, uploads
@@ -55,19 +60,37 @@ def _paged(page: int, page_size: int) -> tuple[int, int]:
 auth = APIRouter(tags=["admin: sign-in"])
 
 
-@auth.post("/auth/login", response_model=s.AdminOut)
-def admin_login(payload: s.AdminLoginIn, response: Response, db: DB):
-    admin = ops.authenticate(db, payload.email, payload.password)
-    db.commit()
+def _start_admin_session(request: Request, response: Response, db, admin: AdminUser) -> None:
+    """A new session row every time (the cookie the browser came with is revoked first)."""
     settings = get_settings()
-    set_session_cookie(response, settings.admin_cookie_name, create_admin_token(admin.id, admin.password_hash),
-                       settings.admin_session_hours * 3600)
+    sessions.revoke_token(db, request.cookies.get(admin_cookie()), "admin")
+    token = sessions.start(db, "admin", admin.id, admin.password_hash, timedelta(hours=settings.admin_session_hours), request)
+    db.commit()
+    set_session_cookie(response, admin_cookie(), token, settings.admin_session_hours * 3600)
+
+
+@auth.post("/auth/login", response_model=s.AdminOut)
+def admin_login(payload: s.AdminLoginIn, request: Request, response: Response, db: DB):
+    admin = ops.authenticate(db, payload.email, payload.password)
+    _start_admin_session(request, response, db, admin)
     return admin
 
 
 @auth.post("/auth/logout", status_code=204)
-def admin_logout(response: Response):
-    clear_session_cookie(response, get_settings().admin_cookie_name)
+def admin_logout(request: Request, response: Response, db: DB):
+    """Ends this session on the server: a copy of the cookie stops working too."""
+    sessions.revoke_token(db, request.cookies.get(admin_cookie()), "admin")
+    db.commit()
+    clear_session_cookie(response, admin_cookie())
+
+
+@auth.post("/auth/logout-all", status_code=204)
+def admin_logout_everywhere(response: Response, admin: CurrentAdmin, db: DB):
+    """Sign out everywhere: every session of this admin account ends now."""
+    sessions.revoke_all(db, "admin", [admin.id])
+    ops.record(db, admin, "admin.logout_all", "Signed out of every session", "admin", admin.id)
+    db.commit()
+    clear_session_cookie(response, admin_cookie())
 
 
 @auth.get("/auth/me", response_model=s.AdminOut)
@@ -76,17 +99,15 @@ def admin_me(admin: CurrentAdmin):
 
 
 @auth.post("/auth/password", status_code=204)
-def change_own_password(payload: s.AdminPasswordIn, response: Response, admin: CurrentAdmin, db: DB):
+def change_own_password(payload: s.AdminPasswordIn, request: Request, response: Response, admin: CurrentAdmin, db: DB):
     """Changes your own password. Your other sessions end; this one gets a new cookie."""
     if not verify_password(payload.current_password, admin.password_hash):
         raise AppError("Your current password is wrong", 400)
     ensure_good_password(payload.new_password)
     admin.password_hash = hash_password(payload.new_password)
     ops.record(db, admin, "admin.password", "Changed their own password", "admin", admin.id)
-    db.commit()
-    settings = get_settings()
-    set_session_cookie(response, settings.admin_cookie_name, create_admin_token(admin.id, admin.password_hash),
-                       settings.admin_session_hours * 3600)
+    sessions.revoke_all(db, "admin", [admin.id])
+    _start_admin_session(request, response, db, admin)
 
 
 admins = APIRouter(tags=["admin: admin accounts"])
@@ -106,7 +127,7 @@ def add_admin(payload: s.AdminCreateIn, admin: AdminWriter, db: DB):
 
 
 @admins.patch("/admins/{admin_id}", response_model=s.AdminOut)
-def update_admin(admin_id: str, payload: s.AdminUpdateIn, admin: AdminWriter, db: DB):
+def update_admin(admin_id: PathId, payload: s.AdminUpdateIn, admin: AdminWriter, db: DB):
     target = db.get(AdminUser, admin_id)
     if target is None:
         raise not_found("Admin")
@@ -116,13 +137,15 @@ def update_admin(admin_id: str, payload: s.AdminUpdateIn, admin: AdminWriter, db
     changes = payload.model_dump(exclude_none=True)
     for key, value in changes.items():
         setattr(target, key, value)
+    if payload.active is False:
+        sessions.revoke_all(db, "admin", [target.id])  # deactivated: signed out everywhere now
     ops.record(db, admin, "admin.update", f"Updated admin {target.email}", "admin", target.id, changes)
     db.commit()
     return target
 
 
 @admins.delete("/admins/{admin_id}", status_code=204)
-def remove_admin(admin_id: str, admin: AdminWriter, db: DB):
+def remove_admin(admin_id: PathId, admin: AdminWriter, db: DB):
     target = db.get(AdminUser, admin_id)
     if target is None:
         raise not_found("Admin")
@@ -131,6 +154,7 @@ def remove_admin(admin_id: str, admin: AdminWriter, db: DB):
     if target.role == "admin" and target.active and ops.active_admin_count(db) <= 1:
         raise AppError("Keep at least one active admin", 409)
     ops.record(db, admin, "admin.delete", f"Removed admin {target.email}", "admin", target.id)
+    sessions.revoke_all(db, "admin", [target.id])
     db.delete(target)
     db.commit()
 
@@ -206,9 +230,9 @@ StudentSort = Literal["newest", "oldest", "name", "last_seen"]
 def _student_query(q: str | None, status: StudentStatus, college: str | None):
     stmt = select(User)
     if q:
-        like = f"%{q.strip().lower()}%"
+        like = like_text.contains(q.strip().lower())
         digits = normalize_phone(q) if any(c.isdigit() for c in q) else ""
-        conditions = [func.lower(User.name).like(like), func.lower(User.college).like(like), User.id == q.strip()]
+        conditions = [func.lower(User.name).like(like, escape=like_text.ESCAPE), func.lower(User.college).like(like, escape=like_text.ESCAPE), User.id == q.strip()]
         if digits:
             conditions.append(User.phone_normalized.like(f"%{digits[-10:]}%"))
         stmt = stmt.where(or_(*conditions))
@@ -230,11 +254,11 @@ def _student_query(q: str | None, status: StudentStatus, college: str | None):
 def list_students(
     _: CurrentAdmin,
     db: DB,
-    q: str | None = Query(None, description="Name, college, phone (any format) or id"),
+    q: str | None = Query(None, max_length=100, description="Name, college, phone (any format) or id"),
     status: StudentStatus = "all",
-    college: str | None = None,
+    college: str | None = Query(None, max_length=160),
     sort: StudentSort = "newest",
-    page: int = Query(1, ge=1),
+    page: int = Query(1, ge=1, le=100_000),
     page_size: int = Query(25, ge=1, le=200),
 ):
     stmt = _student_query(q, status, college)
@@ -252,7 +276,7 @@ def list_students(
 
 
 @students.get("/users/ids", response_model=list[str])
-def student_ids(_: CurrentAdmin, db: DB, q: str | None = None, status: StudentStatus = "all", college: str | None = None):
+def student_ids(_: CurrentAdmin, db: DB, q: str | None = Query(None, max_length=100), status: StudentStatus = "all", college: str | None = Query(None, max_length=160)):
     """Ids of every student matching the filters (for "select all"), newest first."""
     stmt = _student_query(q, status, college).with_only_columns(User.id).order_by(User.created_at.desc())
     return list(db.scalars(stmt.limit(s.BULK_LIMIT)))
@@ -263,20 +287,27 @@ def colleges(_: CurrentAdmin, db: DB):
     return list(db.scalars(select(User.college).distinct().order_by(User.college)))
 
 
-@students.get("/users/export.csv")
-def export_students(_: CurrentAdmin, db: DB, q: str | None = None, status: StudentStatus = "all", college: str | None = None):
+# One export is built in memory: bounded, so a huge table can't exhaust the server.
+EXPORT_LIMIT = 50_000
+
+
+@students.get("/users/export.csv", response_class=StreamingResponse,
+               responses={200: {"content": {"text/csv": {}}, "description": "A CSV file"}})
+def export_students(_: CurrentAdmin, db: DB, q: str | None = Query(None, max_length=100), status: StudentStatus = "all", college: str | None = Query(None, max_length=160)):
     """Every matching student as a CSV file (opens in Excel or Google Sheets)."""
-    users = list(db.scalars(_student_query(q, status, college).order_by(User.created_at)).unique())
+    users = list(db.scalars(_student_query(q, status, college).order_by(User.created_at).limit(EXPORT_LIMIT + 1)).unique())
+    if len(users) > EXPORT_LIMIT:
+        raise AppError(f"More than {EXPORT_LIMIT:,} students match: filter by college or status and export in parts", 422)
     blocked = ops.blocked_numbers(db, (u.phone_normalized for u in users))
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerow(["id", "name", "phone", "college", "department", "passing_year", "group", "role", "github", "contributions", "suspended", "number_blocked", "last_seen", "joined"])
     for u in users:
         row = ops.student_row(u, blocked)
-        writer.writerow([row.id, row.name, row.phone, row.college, row.department or "", row.passing_year, row.group_name or "", row.group_role or "",
+        writer.writerow([csv_cell(v) for v in [row.id, row.name, row.phone, row.college, row.department or "", row.passing_year, row.group_name or "", row.group_role or "",
                          row.github_url or "", row.github_contribution_count if row.github_contribution_count is not None else "",
                          "yes" if row.banned else "", "yes" if row.number_blocked else "",
-                         row.last_seen.isoformat() if row.last_seen else "", row.created_at.isoformat()])
+                         row.last_seen.isoformat() if row.last_seen else "", row.created_at.isoformat()]])
     stamp = utcnow().strftime("%Y%m%d-%H%M")
     return StreamingResponse(iter([buffer.getvalue()]), media_type="text/csv",
                              headers={"Content-Disposition": f'attachment; filename="capstoneconnect-students-{stamp}.csv"'})
@@ -287,7 +318,7 @@ def _checked_hash(password: str, phone: str) -> str:
     return hash_password(password)
 
 
-def _student(db, user_id: str) -> User:
+def _student(db, user_id: PathId) -> User:
     user = db.get(User, user_id)
     if user is None:
         raise not_found("Student")
@@ -295,7 +326,7 @@ def _student(db, user_id: str) -> User:
 
 
 @students.get("/users/{user_id}", response_model=s.StudentDetail)
-def get_student(user_id: str, _: CurrentAdmin, db: DB):
+def get_student(user_id: PathId, _: CurrentAdmin, db: DB):
     return ops.student_detail(db, _student(db, user_id))
 
 
@@ -329,7 +360,7 @@ def create_student(payload: s.StudentCreateIn, admin: AdminWriter, db: DB):
 
 
 @students.patch("/users/{user_id}", response_model=s.StudentDetail)
-def update_student(user_id: str, payload: s.StudentUpdateIn, admin: AdminWriter, db: DB):
+def update_student(user_id: PathId, payload: s.StudentUpdateIn, admin: AdminWriter, db: DB):
     user = _student(db, user_id)
     changes = payload.model_dump(exclude_unset=True)
     before = {key: getattr(user, key) for key in changes if hasattr(user, key)}
@@ -357,7 +388,7 @@ def update_student(user_id: str, payload: s.StudentUpdateIn, admin: AdminWriter,
 
 
 @students.post("/users/{user_id}/password", status_code=204)
-def set_student_password(user_id: str, payload: s.PasswordSetIn, admin: AdminWriter, db: DB):
+def set_student_password(user_id: PathId, payload: s.PasswordSetIn, admin: AdminWriter, db: DB):
     """Sets a new password. Every session of that student ends (they sign in with the new one)."""
     user = _student(db, user_id)
     ensure_good_password(payload.password, user.phone)
@@ -368,7 +399,7 @@ def set_student_password(user_id: str, payload: s.PasswordSetIn, admin: AdminWri
 
 
 @students.post("/users/{user_id}/ban", response_model=s.StudentDetail)
-def ban_student(user_id: str, payload: s.BanIn, admin: AdminWriter, db: DB):
+def ban_student(user_id: PathId, payload: s.BanIn, admin: AdminWriter, db: DB):
     """Suspends the account (signed out at once, can't sign in). Optionally blocks its number too."""
     user = _student(db, user_id)
     ops.ban(db, user, payload.reason)
@@ -382,7 +413,7 @@ def ban_student(user_id: str, payload: s.BanIn, admin: AdminWriter, db: DB):
 
 
 @students.post("/users/{user_id}/unban", response_model=s.StudentDetail)
-def unban_student(user_id: str, admin: AdminWriter, db: DB):
+def unban_student(user_id: PathId, admin: AdminWriter, db: DB):
     """Lifts the suspension. A blocked number stays blocked until removed under Blocked numbers."""
     user = _student(db, user_id)
     ops.unban(user)
@@ -392,7 +423,7 @@ def unban_student(user_id: str, admin: AdminWriter, db: DB):
 
 
 @students.delete("/users/{user_id}", status_code=204)
-def delete_student(user_id: str, admin: AdminWriter, db: DB):
+def delete_student(user_id: PathId, admin: AdminWriter, db: DB):
     user = _student(db, user_id)
     ops.record(db, admin, "user.delete", f"Deleted student {user.name} ({user.phone})", "user", user.id,
                {"name": user.name, "phone": user.phone, "college": user.college})
@@ -401,7 +432,7 @@ def delete_student(user_id: str, admin: AdminWriter, db: DB):
 
 
 @students.delete("/users/{user_id}/{kind}", response_model=s.StudentDetail)
-def remove_student_file(user_id: str, kind: Literal["avatar", "resume"], admin: AdminWriter, db: DB):
+def remove_student_file(user_id: PathId, kind: Literal["avatar", "resume"], admin: AdminWriter, db: DB):
     """Removes a student's photo or résumé, and deletes the file from disk."""
     user = _student(db, user_id)
     url = user.avatar_url if kind == "avatar" else user.resume_url
@@ -449,7 +480,7 @@ numbers = APIRouter(tags=["admin: blocked numbers"])
 
 
 @numbers.get("/banned-phones", response_model=list[s.BannedPhoneOut])
-def list_blocked(_: CurrentAdmin, db: DB, q: str | None = None):
+def list_blocked(_: CurrentAdmin, db: DB, q: str | None = Query(None, max_length=100)):
     stmt = select(BannedPhone).order_by(BannedPhone.created_at.desc())
     if q and any(c.isdigit() for c in q):
         stmt = stmt.where(BannedPhone.phone_normalized.like(f"%{normalize_phone(q)[-10:]}%"))
@@ -495,7 +526,7 @@ def unblock_numbers(payload: s.IdsIn, admin: AdminWriter, db: DB):
 
 
 @numbers.delete("/banned-phones/{phone}", status_code=204)
-def unblock_number(phone: str, admin: AdminWriter, db: DB):
+def unblock_number(phone: Annotated[str, PathParam(max_length=32)], admin: AdminWriter, db: DB):
     row = db.get(BannedPhone, normalize_phone(phone))
     if row is None:
         raise not_found("Blocked number")
@@ -518,9 +549,9 @@ GroupStatus = Literal["all", "open", "full"]
 def list_groups(
     _: CurrentAdmin,
     db: DB,
-    q: str | None = None,
+    q: str | None = Query(None, max_length=100),
     status: GroupStatus = "all",
-    page: int = Query(1, ge=1),
+    page: int = Query(1, ge=1, le=100_000),
     page_size: int = Query(25, ge=1, le=200),
 ):
     groups = _matching_groups(db, q, status)
@@ -531,8 +562,8 @@ def list_groups(
 def _matching_groups(db, q: str | None, status: GroupStatus) -> list[Group]:
     stmt = select(Group).order_by(Group.created_at.desc())
     if q:
-        like = f"%{q.strip().lower()}%"
-        stmt = stmt.where(or_(func.lower(Group.name).like(like), func.lower(Group.domain).like(like), Group.id == q.strip()))
+        like = like_text.contains(q.strip().lower())
+        stmt = stmt.where(or_(func.lower(Group.name).like(like, escape=like_text.ESCAPE), func.lower(Group.domain).like(like, escape=like_text.ESCAPE), Group.id == q.strip()))
     groups = list(db.scalars(stmt).unique())
     if status == "open":
         groups = [g for g in groups if len(g.members) < g.max_members]
@@ -542,7 +573,7 @@ def _matching_groups(db, q: str | None, status: GroupStatus) -> list[Group]:
 
 
 @groups_router.get("/groups/ids", response_model=list[str])
-def group_ids(_: CurrentAdmin, db: DB, q: str | None = None, status: GroupStatus = "all"):
+def group_ids(_: CurrentAdmin, db: DB, q: str | None = Query(None, max_length=100), status: GroupStatus = "all"):
     """Ids of every group matching the filters (for "select all")."""
     return [g.id for g in _matching_groups(db, q, status)[: s.BULK_LIMIT]]
 
@@ -565,7 +596,7 @@ def delete_groups(payload: s.IdsIn, admin: AdminWriter, db: DB):
     return {"done": len(done), "skipped": skipped}
 
 
-def _group(db, group_id: str) -> Group:
+def _group(db, group_id: PathId) -> Group:
     group = db.get(Group, group_id)
     if group is None:
         raise not_found("Group")
@@ -573,7 +604,7 @@ def _group(db, group_id: str) -> Group:
 
 
 @groups_router.get("/groups/{group_id}", response_model=s.GroupDetail)
-def get_group(group_id: str, _: CurrentAdmin, db: DB):
+def get_group(group_id: PathId, _: CurrentAdmin, db: DB):
     group = _group(db, group_id)
     members = sorted(group.members, key=lambda m: m.joined_at)
     pending = db.scalar(select(func.count()).select_from(JoinRequest).where(JoinRequest.group_id == group.id, JoinRequest.status == "pending")) or 0
@@ -585,7 +616,7 @@ def get_group(group_id: str, _: CurrentAdmin, db: DB):
 
 
 @groups_router.patch("/groups/{group_id}", response_model=s.GroupDetail)
-def edit_group(group_id: str, payload: s.GroupEditIn, admin: AdminWriter, db: DB):
+def edit_group(group_id: PathId, payload: s.GroupEditIn, admin: AdminWriter, db: DB):
     """Name, description, domain and requirements (the size can't change)."""
     group = _group(db, group_id)
     changes = payload.model_dump(exclude_unset=True, exclude_none=True)
@@ -600,7 +631,7 @@ def edit_group(group_id: str, payload: s.GroupEditIn, admin: AdminWriter, db: DB
 
 
 @groups_router.post("/groups/{group_id}/lead", response_model=s.GroupDetail)
-def make_lead(group_id: str, payload: s.LeadIn, admin: AdminWriter, db: DB):
+def make_lead(group_id: PathId, payload: s.LeadIn, admin: AdminWriter, db: DB):
     """Makes another member the Group Lead (the old lead stays as a member)."""
     group = _group(db, group_id)
     old = next((m.user.name for m in group.members if m.role == "admin"), None)
@@ -612,7 +643,7 @@ def make_lead(group_id: str, payload: s.LeadIn, admin: AdminWriter, db: DB):
 
 
 @groups_router.delete("/groups/{group_id}", status_code=204)
-def delete_group(group_id: str, admin: AdminWriter, db: DB):
+def delete_group(group_id: PathId, admin: AdminWriter, db: DB):
     """Deletes the group and its chat; members become free to join another group."""
     group = _group(db, group_id)
     ops.record(db, admin, "group.delete", f"Deleted group {group.name} ({len(group.members)} members)", "group", group.id)
@@ -621,7 +652,7 @@ def delete_group(group_id: str, admin: AdminWriter, db: DB):
 
 
 @groups_router.delete("/groups/{group_id}/members/{user_id}", status_code=204)
-def remove_member(group_id: str, user_id: str, admin: AdminWriter, db: DB):
+def remove_member(group_id: PathId, user_id: PathId, admin: AdminWriter, db: DB):
     """Removes a student from a group (a Group Lead hands over to the longest-serving member)."""
     group = _group(db, group_id)
     user = _student(db, user_id)
@@ -638,7 +669,7 @@ def list_requests(
     db: DB,
     status: Literal["all", "pending", "accepted", "declined", "withdrawn", "cancelled"] = "all",
     type: Literal["all", "join_request", "invitation"] = "all",
-    page: int = Query(1, ge=1),
+    page: int = Query(1, ge=1, le=100_000),
     page_size: int = Query(25, ge=1, le=200),
 ):
     stmt = select(JoinRequest)
@@ -689,7 +720,7 @@ def list_recommendations(
     _: CurrentAdmin,
     db: DB,
     status: Literal["all", "pending", "invited", "dismissed", "closed"] = "all",
-    page: int = Query(1, ge=1),
+    page: int = Query(1, ge=1, le=100_000),
     page_size: int = Query(25, ge=1, le=200),
 ):
     """Members vouching for Looking students (read-only here)."""
@@ -710,7 +741,7 @@ def list_recommendations(
 
 
 @groups_router.post("/requests/{request_id}/cancel", status_code=204)
-def cancel_request(request_id: str, admin: AdminWriter, db: DB):
+def cancel_request(request_id: PathId, admin: AdminWriter, db: DB):
     req = db.get(JoinRequest, request_id)
     if req is None:
         raise not_found("Request")
@@ -732,8 +763,8 @@ chat_router = APIRouter(tags=["admin: chat"])
 def list_conversations(
     _: CurrentAdmin,
     db: DB,
-    q: str | None = Query(None, description="A participant's name, or a group name"),
-    page: int = Query(1, ge=1),
+    q: str | None = Query(None, max_length=100, description="A participant's name, or a group name"),
+    page: int = Query(1, ge=1, le=100_000),
     page_size: int = Query(25, ge=1, le=200),
 ):
     convs = list(db.scalars(select(Conversation).order_by(Conversation.updated_at.desc())).unique())
@@ -751,7 +782,7 @@ def list_conversations(
 
 
 @chat_router.get("/conversations/{conversation_id}/messages", response_model=list[s.MessageRow])
-def conversation_messages(conversation_id: str, _: CurrentAdmin, db: DB, limit: int = Query(200, ge=1, le=1000)):
+def conversation_messages(conversation_id: PathId, _: CurrentAdmin, db: DB, limit: int = Query(200, ge=1, le=1000)):
     if db.get(Conversation, conversation_id) is None:
         raise not_found("Conversation")
     latest = list(db.scalars(select(Message).where(Message.conversation_id == conversation_id).order_by(Message.created_at.desc()).limit(limit)))
@@ -776,7 +807,7 @@ def delete_messages(payload: s.IdsIn, admin: AdminWriter, db: DB):
 
 
 @chat_router.delete("/messages/{message_id}", status_code=204)
-def delete_message(message_id: str, admin: AdminWriter, db: DB):
+def delete_message(message_id: PathId, admin: AdminWriter, db: DB):
     message = db.get(Message, message_id)
     if message is None:
         raise not_found("Message")
@@ -797,17 +828,17 @@ audit = APIRouter(tags=["admin: audit log"])
 def audit_log(
     _: CurrentAdmin,
     db: DB,
-    q: str | None = Query(None, description="Text in the summary, or an admin's email"),
-    action: str | None = Query(None, description='e.g. "user.ban", or a prefix like "user."'),
-    page: int = Query(1, ge=1),
+    q: str | None = Query(None, max_length=100, description="Text in the summary, or an admin's email"),
+    action: str | None = Query(None, max_length=60, description='e.g. "user.ban", or a prefix like "user."'),
+    page: int = Query(1, ge=1, le=100_000),
     page_size: int = Query(50, ge=1, le=200),
 ):
     stmt = select(AuditLog)
     if q:
-        like = f"%{q.strip().lower()}%"
-        stmt = stmt.where(or_(func.lower(AuditLog.summary).like(like), func.lower(AuditLog.admin_email).like(like)))
+        like = like_text.contains(q.strip().lower())
+        stmt = stmt.where(or_(func.lower(AuditLog.summary).like(like, escape=like_text.ESCAPE), func.lower(AuditLog.admin_email).like(like, escape=like_text.ESCAPE)))
     if action:
-        stmt = stmt.where(AuditLog.action.like(f"{action}%"))
+        stmt = stmt.where(AuditLog.action.like(like_text.starts_with(action), escape=like_text.ESCAPE))
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     offset, limit = _paged(page, page_size)
     items = list(db.scalars(stmt.order_by(AuditLog.created_at.desc()).offset(offset).limit(limit)))
@@ -840,7 +871,7 @@ def _report_row(db, r: Report) -> s.ReportRow:
     )
 
 
-def _report(db, report_id: str) -> Report:
+def _report(db, report_id: PathId) -> Report:
     report = db.get(Report, report_id)
     if report is None:
         raise not_found("Report")
@@ -859,7 +890,7 @@ def list_reports(
     db: DB,
     status: Literal["all", "open", "reviewed", "dismissed", "actioned"] = "open",
     target_type: Literal["all", "user", "group", "message"] = "all",
-    page: int = Query(1, ge=1),
+    page: int = Query(1, ge=1, le=100_000),
     page_size: int = Query(25, ge=1, le=200),
 ):
     stmt = select(Report)
@@ -874,7 +905,7 @@ def list_reports(
 
 
 @community.post("/reports/{report_id}/status", response_model=s.ReportRow)
-def set_report_status(report_id: str, payload: s.ReportStatusIn, admin: AdminWriter, db: DB):
+def set_report_status(report_id: PathId, payload: s.ReportStatusIn, admin: AdminWriter, db: DB):
     """Mark reviewed, dismiss, or reopen."""
     report = _report(db, report_id)
     if payload.status == "open":
@@ -887,7 +918,7 @@ def set_report_status(report_id: str, payload: s.ReportStatusIn, admin: AdminWri
 
 
 @community.post("/reports/{report_id}/suspend", response_model=s.ReportRow)
-def suspend_from_report(report_id: str, payload: s.ReportSuspendIn, admin: AdminWriter, db: DB):
+def suspend_from_report(report_id: PathId, payload: s.ReportSuspendIn, admin: AdminWriter, db: DB):
     """Suspends the student behind the report (they are signed out at once)."""
     report = _report(db, report_id)
     user = db.get(User, report.target_user_id) if report.target_user_id else None
@@ -903,7 +934,7 @@ def suspend_from_report(report_id: str, payload: s.ReportSuspendIn, admin: Admin
 
 
 @community.post("/reports/{report_id}/delete-message", response_model=s.ReportRow)
-def delete_reported_message(report_id: str, admin: AdminWriter, db: DB):
+def delete_reported_message(report_id: PathId, admin: AdminWriter, db: DB):
     report = _report(db, report_id)
     if report.target_type != "message":
         raise AppError("This report is not about a message", 409)
@@ -947,7 +978,7 @@ def create_announcement(payload: s.AnnouncementIn, admin: AdminWriter, db: DB):
 
 
 @community.patch("/announcements/{announcement_id}", response_model=s.AnnouncementRow)
-def update_announcement(announcement_id: str, payload: s.AnnouncementPatch, admin: AdminWriter, db: DB):
+def update_announcement(announcement_id: PathId, payload: s.AnnouncementPatch, admin: AdminWriter, db: DB):
     a = db.get(Announcement, announcement_id)
     if a is None:
         raise not_found("Announcement")
@@ -966,7 +997,7 @@ def update_announcement(announcement_id: str, payload: s.AnnouncementPatch, admi
 
 
 @community.delete("/announcements/{announcement_id}", status_code=204)
-def delete_announcement(announcement_id: str, admin: AdminWriter, db: DB):
+def delete_announcement(announcement_id: PathId, admin: AdminWriter, db: DB):
     a = db.get(Announcement, announcement_id)
     if a is None:
         raise not_found("Announcement")

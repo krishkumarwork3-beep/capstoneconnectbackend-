@@ -40,3 +40,21 @@ def clear_session_cookie(response: Response, name: str) -> None:
     # A cookie is only removed with the same domain, path and flags it was set with.
     response.delete_cookie(name, path="/", domain=s.cookie_domain or None, secure=s.cookie_secure,
                            httponly=True, samesite=s.cookie_samesite)
+
+
+def can_use_host_prefix() -> bool:
+    """`__Host-` cookies are pinned by the browser to this exact host, over HTTPS, for the whole
+    path: no subdomain or plain-http page can set or overwrite them. Possible only when the
+    cookie is Secure and has no Domain."""
+    s = get_settings()
+    return s.cookie_secure and not (s.cookie_domain or "").strip()
+
+
+def student_cookie() -> str:
+    name = get_settings().cookie_name
+    return f"__Host-{name}" if can_use_host_prefix() else name
+
+
+def admin_cookie() -> str:
+    name = get_settings().admin_cookie_name
+    return f"__Host-{name}" if can_use_host_prefix() else name

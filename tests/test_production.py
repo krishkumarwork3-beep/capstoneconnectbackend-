@@ -225,9 +225,11 @@ def test_cookie_attributes_for_each_layout(monkeypatch, layout, settings, expect
         else:
             assert (part in cookie) == present, f"{layout}: {part} in {cookie}"
     # The socket signs in with that same cookie.
-    token = r.headers["set-cookie"].split(";")[0].split("=", 1)[1]
+    name, token = r.headers["set-cookie"].split(";")[0].split("=", 1)
+    # Secure and no Domain: the browser pins a __Host- cookie to this host (no subdomain can set it).
+    assert name == (f"__Host-{s.cookie_name}" if settings.get("cookie_secure") and not settings.get("cookie_domain") else s.cookie_name), layout
     ws_client = TestClient(app)
-    ws_client.cookies.set(s.cookie_name, token)
+    ws_client.cookies.set(name, token)
     with ws_client.websocket_connect("/api/ws") as ws:
         assert ws.receive_json()["type"] == "hello"
     # Logging out clears it with the same attributes.

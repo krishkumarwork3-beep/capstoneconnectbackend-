@@ -1,15 +1,27 @@
 """Request and response shapes of the admin API (/api/admin)."""
 
 from datetime import datetime
-from typing import Generic, Literal, TypeVar
+from typing import Annotated, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.links import clean_link
 from app.security import MIN_PASSWORD_LENGTH
 
 T = TypeVar("T")
 AdminRole = Literal["admin", "viewer"]
 
+
+
+class In(BaseModel):
+    """Admin request bodies: explicit allowlists, unknown fields refused."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+Id = Annotated[str, Field(min_length=1, max_length=64)]
+Tag = Annotated[str, Field(max_length=100)]
+Phone = Annotated[str, Field(min_length=1, max_length=32)]
 
 class Out(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -27,7 +39,7 @@ class Page(Out, Generic[T]):
 # --------------------------------------------------------------------------------------------
 
 
-class AdminLoginIn(BaseModel):
+class AdminLoginIn(In):
     email: str = Field(min_length=3, max_length=200)
     password: str = Field(min_length=1, max_length=200)
 
@@ -42,7 +54,7 @@ class AdminOut(Out):
     created_at: datetime
 
 
-class AdminCreateIn(BaseModel):
+class AdminCreateIn(In):
     email: str = Field(min_length=3, max_length=200)
     name: str = Field(min_length=1, max_length=120)
     password: str = Field(min_length=MIN_PASSWORD_LENGTH, max_length=200)
@@ -57,13 +69,13 @@ class AdminCreateIn(BaseModel):
         return value
 
 
-class AdminUpdateIn(BaseModel):
+class AdminUpdateIn(In):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     role: AdminRole | None = None
     active: bool | None = None
 
 
-class AdminPasswordIn(BaseModel):
+class AdminPasswordIn(In):
     current_password: str = Field(min_length=1, max_length=200)
     new_password: str = Field(min_length=MIN_PASSWORD_LENGTH, max_length=200)
 
@@ -95,7 +107,7 @@ class StudentRow(Out):
 
 class StudentDetail(StudentRow):
     bio: str = ""
-    skills: list[str] = []
+    skills: list[Tag] = []
     avatar_url: str | None = None
     resume_url: str | None = None
     github_verified: bool = False
@@ -105,7 +117,7 @@ class StudentDetail(StudentRow):
     conversations: int = 0
 
 
-class StudentCreateIn(BaseModel):
+class StudentCreateIn(In):
     name: str = Field(min_length=1, max_length=120)
     college: str = Field(min_length=1, max_length=160)
     department: str | None = Field(default=None, max_length=160)
@@ -113,11 +125,11 @@ class StudentCreateIn(BaseModel):
     phone: str = Field(min_length=7, max_length=32)
     password: str = Field(min_length=MIN_PASSWORD_LENGTH, max_length=200)
     bio: str = Field(default="", max_length=400)
-    skills: list[str] = Field(default_factory=list, max_length=30)
+    skills: list[Tag] = Field(default_factory=list, max_length=30)
     github_url: str | None = Field(default=None, max_length=300)
 
 
-class StudentUpdateIn(BaseModel):
+class StudentUpdateIn(In):
     """Every field optional: only those sent are changed."""
 
     name: str | None = Field(default=None, min_length=1, max_length=120)
@@ -126,15 +138,15 @@ class StudentUpdateIn(BaseModel):
     passing_year: int | None = Field(default=None, ge=2000, le=2100)
     phone: str | None = Field(default=None, min_length=7, max_length=32)
     bio: str | None = Field(default=None, max_length=400)
-    skills: list[str] | None = Field(default=None, max_length=30)
+    skills: list[Tag] | None = Field(default=None, max_length=30)
     github_url: str | None = Field(default=None, max_length=300)
 
 
-class PasswordSetIn(BaseModel):
+class PasswordSetIn(In):
     password: str = Field(min_length=MIN_PASSWORD_LENGTH, max_length=200)
 
 
-class BanIn(BaseModel):
+class BanIn(In):
     reason: str = Field(default="", max_length=500)
     # Also block the account's phone number from signing up again.
     block_number: bool = False
@@ -143,8 +155,8 @@ class BanIn(BaseModel):
 BULK_LIMIT = 5000
 
 
-class BulkIn(BaseModel):
-    ids: list[str] = Field(min_length=1, max_length=BULK_LIMIT)
+class BulkIn(In):
+    ids: list[Id] = Field(min_length=1, max_length=BULK_LIMIT)
     action: Literal["ban", "unban", "delete"]
     reason: str = Field(default="", max_length=500)
 
@@ -154,10 +166,10 @@ class BulkOut(BaseModel):
     skipped: list[str]
 
 
-class IdsIn(BaseModel):
+class IdsIn(In):
     """Several records at once (groups, requests, messages; numbers for blocked numbers)."""
 
-    ids: list[str] = Field(min_length=1, max_length=BULK_LIMIT)
+    ids: list[Id] = Field(min_length=1, max_length=BULK_LIMIT)
 
 
 # --------------------------------------------------------------------------------------------
@@ -165,8 +177,8 @@ class IdsIn(BaseModel):
 # --------------------------------------------------------------------------------------------
 
 
-class BannedPhoneIn(BaseModel):
-    phones: list[str] = Field(min_length=1, max_length=500, description="One or more numbers, any format")
+class BannedPhoneIn(In):
+    phones: list[Phone] = Field(min_length=1, max_length=500, description="One or more numbers, any format")
     reason: str = Field(default="", max_length=500)
 
 
@@ -217,7 +229,7 @@ class GroupDetail(GroupRow):
     pending_requests: int
 
 
-class GroupEditIn(BaseModel):
+class GroupEditIn(In):
     """Only the fields sent change. Group size is fixed once a group exists."""
 
     model_config = ConfigDict(extra="forbid")
@@ -225,7 +237,7 @@ class GroupEditIn(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=160)
     description: str | None = Field(default=None, max_length=2000)
     domain: str | None = Field(default=None, min_length=1, max_length=160)
-    requirements: list[str] | None = Field(default=None, max_length=20)
+    requirements: list[Tag] | None = Field(default=None, max_length=20)
 
     @field_validator("requirements")
     @classmethod
@@ -239,8 +251,8 @@ class GroupEditIn(BaseModel):
         return seen
 
 
-class LeadIn(BaseModel):
-    user_id: str
+class LeadIn(In):
+    user_id: Id
 
 
 class RecommendationRow(Out):
@@ -320,24 +332,19 @@ class ReportRow(Out):
     created_at: datetime
 
 
-class ReportStatusIn(BaseModel):
+class ReportStatusIn(In):
     status: Literal["open", "reviewed", "dismissed"]
 
 
-class ReportSuspendIn(BaseModel):
+class ReportSuspendIn(In):
     reason: str = Field(default="", max_length=500)
 
 
 def _http_link(value: str | None) -> str | None:
-    if value is None or value.strip() == "":
-        return None
-    value = value.strip()
-    if not (value.startswith("https://") or value.startswith("http://") or value.startswith("/")) or value.startswith("//"):
-        raise ValueError("the link must start with https:// (or / for a page on this site)")
-    return value
+    return clean_link(value)
 
 
-class AnnouncementIn(BaseModel):
+class AnnouncementIn(In):
     text: str = Field(min_length=1, max_length=300)
     link_url: str | None = Field(default=None, max_length=500)
     link_label: str | None = Field(default=None, max_length=60)
@@ -351,7 +358,7 @@ class AnnouncementIn(BaseModel):
         return _http_link(value)
 
 
-class AnnouncementPatch(BaseModel):
+class AnnouncementPatch(In):
     model_config = ConfigDict(extra="forbid")
 
     text: str | None = Field(default=None, min_length=1, max_length=300)

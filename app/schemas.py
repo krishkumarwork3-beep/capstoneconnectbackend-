@@ -1,7 +1,7 @@
 """Request and response shapes. Responses mirror the frontend's `lib/types` exactly."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -9,6 +9,18 @@ from app.security import MIN_PASSWORD_LENGTH
 
 GroupRole = Literal["admin", "member"]
 RequestStatus = Literal["pending", "accepted", "declined", "withdrawn", "cancelled"]
+
+
+class In(BaseModel):
+    """Every request body: an explicit allowlist. Unknown fields are refused (no mass assignment:
+    nobody can send role, banned_at, password_hash, github_verified… and have it stick)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+# Bounded building blocks for request fields.
+Id = Annotated[str, Field(min_length=1, max_length=64)]
+Tag = Annotated[str, Field(max_length=100)]  # a skill or a requirement (cleaned to 60 below)
 
 
 class Out(BaseModel):
@@ -40,9 +52,17 @@ class UserOut(Out):
     group_name: str | None = None
     group_role: GroupRole | None = None
     github_verified: bool = False
-    github_contribution_count: int | None = None
+    github_contribution_count: int | None = Field(default=None, ge=0, le=10**9)  # ignored: the server counts
     last_seen: datetime | None = None
     created_at: datetime
+
+
+class AvatarOut(Out):
+    avatar_url: str
+
+
+class ResumeOut(Out):
+    resume_url: str
 
 
 class UserPage(Out):
@@ -61,7 +81,7 @@ def _clean_list(values: list[str]) -> list[str]:
     return seen
 
 
-class SignupIn(BaseModel):
+class SignupIn(In):
     name: str = Field(min_length=1, max_length=120)
     college: str = Field(min_length=1, max_length=160)
     department: str | None = Field(default=None, max_length=160)
@@ -69,11 +89,11 @@ class SignupIn(BaseModel):
     phone: str = Field(min_length=7, max_length=32)
     password: str = Field(min_length=MIN_PASSWORD_LENGTH, max_length=200)
     bio: str = Field(default="", max_length=400)
-    skills: list[str] = Field(default_factory=list, max_length=30)
+    skills: list[Tag] = Field(default_factory=list, max_length=30)
     github_url: str | None = Field(default=None, max_length=300)
     # Uploaded after the account exists (avatar/resume endpoints); accepted here for completeness.
-    avatar_url: str | None = None
-    resume_url: str | None = None
+    avatar_url: str | None = Field(default=None, max_length=500)
+    resume_url: str | None = Field(default=None, max_length=500)
 
     @field_validator("skills")
     @classmethod
@@ -81,26 +101,29 @@ class SignupIn(BaseModel):
         return _clean_list(value)
 
 
-class LoginIn(BaseModel):
+class LoginIn(In):
     phone: str = Field(min_length=1, max_length=32)
     password: str = Field(default="", max_length=200)
 
 
-class UserUpdateIn(BaseModel):
-    """Name, college and graduation year are fixed at sign-up and ignored if sent."""
+class UserUpdateIn(In):
+    """Name, college and graduation year are fixed at sign-up and ignored if sent. Every other
+    unknown field (role, banned_at, password_hash, group_id…) is refused."""
 
-    model_config = ConfigDict(extra="ignore")
-
+    # Accepted and ignored (locked at sign-up), so older clients that send the whole profile work.
+    name: str | None = Field(default=None, max_length=120)
+    college: str | None = Field(default=None, max_length=160)
+    passing_year: int | None = Field(default=None, ge=1900, le=2200)
     department: str | None = Field(default=None, max_length=160)
     bio: str | None = Field(default=None, max_length=400)
-    skills: list[str] | None = Field(default=None, max_length=30)
+    skills: list[Tag] | None = Field(default=None, max_length=30)
     github_url: str | None = Field(default=None, max_length=300)
     github_verified: bool | None = None
-    github_contribution_count: int | None = None
+    github_contribution_count: int | None = Field(default=None, ge=0, le=10**9)  # ignored: the server counts
     # Only "" or null (remove it): files are set by the upload endpoints, never from a link, so
     # nobody can point their profile's résumé at another site or at someone else's private file.
-    resume_url: str | None = None
-    avatar_url: str | None = None
+    resume_url: str | None = Field(default=None, max_length=500)
+    avatar_url: str | None = Field(default=None, max_length=500)
 
     @field_validator("resume_url", "avatar_url")
     @classmethod
@@ -120,7 +143,7 @@ class UserUpdateIn(BaseModel):
 # --------------------------------------------------------------------------------------------
 
 
-class ForgotIn(BaseModel):
+class ForgotIn(In):
     phone: str = Field(min_length=7, max_length=32)
 
 
@@ -131,7 +154,7 @@ class ForgotOut(BaseModel):
     dev_code: str | None = None
 
 
-class VerifyCodeIn(BaseModel):
+class VerifyCodeIn(In):
     phone: str = Field(min_length=7, max_length=32)
     code: str = Field(min_length=4, max_length=10)
 
@@ -140,8 +163,8 @@ class VerifyCodeOut(BaseModel):
     reset_token: str
 
 
-class ResetIn(BaseModel):
-    reset_token: str
+class ResetIn(In):
+    reset_token: str = Field(min_length=1, max_length=2000)
     password: str = Field(min_length=MIN_PASSWORD_LENGTH, max_length=200)
 
 
@@ -182,11 +205,11 @@ class GroupPage(Out):
     total: int
 
 
-class GroupCreateIn(BaseModel):
+class GroupCreateIn(In):
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(min_length=1, max_length=2000)
     max_members: int = Field(ge=2, le=20)
-    requirements: list[str] = Field(default_factory=list, max_length=20)
+    requirements: list[Tag] = Field(default_factory=list, max_length=20)
     domain: str = Field(min_length=1, max_length=160)
 
     @field_validator("requirements")
@@ -195,14 +218,15 @@ class GroupCreateIn(BaseModel):
         return _clean_list(value)
 
 
-class GroupUpdateIn(BaseModel):
+class GroupUpdateIn(In):
     # Group size is fixed: sending max_members is rejected in the route.
-    model_config = ConfigDict(extra="allow")
 
     name: str | None = Field(default=None, min_length=1, max_length=160)
     description: str | None = Field(default=None, max_length=2000)
-    requirements: list[str] | None = Field(default=None, max_length=20)
+    requirements: list[Tag] | None = Field(default=None, max_length=20)
     domain: str | None = Field(default=None, max_length=160)
+    # Accepted only so the route can answer "Group size cannot be changed".
+    max_members: int | None = Field(default=None, ge=0, le=1000)
 
     @field_validator("requirements")
     @classmethod
@@ -234,15 +258,15 @@ class JoinRequestOut(Out):
     updated_at: datetime
 
 
-class NoteIn(BaseModel):
+class NoteIn(In):
     note: str = Field(default="", max_length=1000)
 
 
 class InvitationIn(NoteIn):
-    group_id: str
+    group_id: Id
 
 
-class RespondIn(BaseModel):
+class RespondIn(In):
     status: RequestStatus
 
 
@@ -259,11 +283,11 @@ class RecommendationOut(Out):
     updated_at: datetime
 
 
-class RecommendationIn(BaseModel):
-    groupId: str
-    studentId: str
+class RecommendationIn(In):
+    groupId: Id
+    studentId: Id
     # Ignored: the recommender is always the signed-in user.
-    recommenderId: str | None = None
+    recommenderId: str | None = Field(default=None, max_length=64)
     note: str | None = Field(default=None, max_length=1000)
 
 
@@ -272,7 +296,7 @@ class RecommendationIn(BaseModel):
 # --------------------------------------------------------------------------------------------
 
 
-class AttachmentIO(BaseModel):
+class AttachmentIO(In):
     name: str = Field(max_length=255)
     url: str = Field(max_length=500)
     size: int = Field(ge=0)
@@ -319,14 +343,14 @@ class ConversationOut(Out):
     updated_at: datetime
 
 
-class SendMessageIn(BaseModel):
+class SendMessageIn(In):
     text: str = Field(default="", max_length=4000)
     attachment: AttachmentIO | None = None
     client_id: str | None = Field(default=None, max_length=64)
 
 
-class DirectIn(BaseModel):
-    user_id: str
+class DirectIn(In):
+    user_id: Id
 
 
 # --------------------------------------------------------------------------------------------

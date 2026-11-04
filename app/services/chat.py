@@ -118,6 +118,7 @@ def send_message(
         attachment_name=attachment["name"] if attachment else None,
         attachment_url=attachment["url"] if attachment else None,
         attachment_size=attachment["size"] if attachment else None,
+        client_id=client_id or None,
         created_at=now,
     )
     db.add(message)

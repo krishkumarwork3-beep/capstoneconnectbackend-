@@ -17,6 +17,7 @@ from contextvars import ContextVar
 from app.config import get_settings
 
 log = logging.getLogger("app.requests")
+log_errors = logging.getLogger("app.errors")
 request_id: ContextVar[str] = ContextVar("request_id", default="-")
 _SANE_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
@@ -25,10 +26,13 @@ API_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
 
 
 def _docs_csp() -> str:
-    # Swagger UI / ReDoc load their own scripts from a CDN; they may only be framed by the admin
-    # portal (its API page embeds them).
+    # Swagger UI and ReDoc run on files this API serves (/docs-assets), plus FastAPI's short inline
+    # start-up script; nothing from another site. Only the admin portal may frame them (its API
+    # page embeds them).
     origins = " ".join(o for o in get_settings().cors_origins if o.startswith("http"))
-    return f"frame-ancestors 'self' {origins}".strip()
+    return ("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self'; "
+            f"object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self' {origins}").strip()
 
 
 class RequestContextMiddleware:
@@ -58,20 +62,40 @@ class RequestContextMiddleware:
                     (b"referrer-policy", b"strict-origin-when-cross-origin"),
                     (b"cross-origin-opener-policy", b"same-origin"),
                 ]
-                if path in ("/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"):
+                if path in ("/docs", "/redoc", "/openapi.json") or path.startswith("/docs-assets/"):
                     extra.append((b"content-security-policy", _docs_csp().encode()))
                 elif path.startswith("/uploads/"):
                     extra.append((b"x-frame-options", b"DENY"))
                 else:
                     extra += [(b"content-security-policy", API_CSP.encode()), (b"x-frame-options", b"DENY")]
+                if path.startswith("/api/"):
+                    # Answers carry personal data: never kept by a browser or a shared cache.
+                    extra.append((b"cache-control", b"no-store"))
                 if secure:
                     extra.append((b"strict-transport-security", b"max-age=31536000; includeSubDomains"))
                 present = {k.lower() for k, _ in message.get("headers", [])}
                 message["headers"] = list(message.get("headers", [])) + [(k, v) for k, v in extra if k not in present]
             await send(message)
 
+        started_response = False
+
+        async def tracking_send(message):
+            nonlocal started_response
+            if message["type"] == "http.response.start":
+                started_response = True
+            await send_with_headers(message)
+
         try:
-            await self.app(scope, receive, send_with_headers)
+            await self.app(scope, receive, tracking_send)
+        except Exception:
+            # Anything a route didn't handle: logged in full here, a plain answer for the visitor
+            # (with the request id to quote, and the usual security headers).
+            log_errors.exception("Unhandled error (request %s)", rid)
+            if not started_response:
+                body = json.dumps({"message": "Something went wrong on our side. Try again in a moment.", "request_id": rid}).encode()
+                await tracking_send({"type": "http.response.start", "status": 500,
+                                     "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]})
+                await tracking_send({"type": "http.response.body", "body": body})
         finally:
             client = scope.get("client")
             log.info(json.dumps({

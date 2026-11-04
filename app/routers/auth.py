@@ -10,14 +10,17 @@ from sqlalchemy.exc import IntegrityError
 
 from app import schemas
 from app.config import get_settings
-from app.cookies import clear_session_cookie, set_session_cookie
-from app.deps import DB, CurrentUser, OptionalUser
+from datetime import timedelta
+
+from app.cookies import clear_session_cookie, set_session_cookie, student_cookie
+from app.deps import PathId, DB, CurrentUser, OptionalUser
 from app.errors import AppError
 from app.models import User, utcnow
 from app.passwords import ensure_good_password
-from app.security import create_session_token, hash_password, new_id, normalize_phone, verify_password
+from app.security import hash_password, new_id, normalize_phone, verify_password
 from app.serializers import user_out
-from app.services import bans, github, limits, password_reset
+from app.services import admin as admin_ops
+from app.services import bans, github, limits, lockout, password_reset, sessions
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -26,11 +29,20 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 _DUMMY_HASH = hash_password("not-a-real-password-for-timing")
 
 
-def _start_session(response: Response, user: User) -> None:
+def _bearer(request: Request) -> str | None:
+    header = request.headers.get("authorization", "")
+    return header[7:].strip() or None if header.lower().startswith("bearer ") else None
+
+
+def _start_session(request: Request, response: Response, db, user: User) -> None:
+    """Always a brand-new session row (whatever cookie the browser came with is revoked, so a
+    session planted before sign-in is never promoted), committed before the cookie is sent."""
     settings = get_settings()
+    sessions.revoke_token(db, request.cookies.get(student_cookie()), "student")
+    token = sessions.start(db, "student", user.id, user.password_hash, timedelta(days=settings.session_days), request)
+    db.commit()
     # SameSite, Secure and Domain come from the settings (see app.cookies for the layouts).
-    set_session_cookie(response, settings.cookie_name, create_session_token(user.id, user.password_hash),
-                       settings.session_days * 86400)
+    set_session_cookie(response, student_cookie(), token, settings.session_days * 86400)
 
 
 @router.post("/signup", response_model=schemas.UserOut, status_code=201)
@@ -68,32 +80,47 @@ def signup(payload: schemas.SignupIn, request: Request, response: Response, back
 
     if github_username:
         background.add_task(github.sync_user, user.id)
-    _start_session(response, user)
+    _start_session(request, response, db, user)
     return user_out(user)
 
 
 @router.post("/login", response_model=schemas.UserOut)
 def login(payload: schemas.LoginIn, request: Request, response: Response, db: DB):
     """Five wrong passwords for a number (or 20 from one address) in 15 minutes: 429 until the
-    window ends. Signing in clears the number's count."""
+    window ends; after that the number's lock-out doubles with each further failure (up to a day,
+    app.services.lockout). Every way of writing the number counts together. Signing in clears it."""
     rule, ip = limits.rule("login"), limits.client_ip(request)
+    account = lockout.student_key(payload.phone)
     limits.check(db, rule, payload.phone, ip)
+    lockout.check(db, account)
     user = db.scalar(select(User).where(User.phone_normalized == normalize_phone(payload.phone)))
     password_ok = verify_password(payload.password, user.password_hash if user else _DUMMY_HASH)
     if user is None or not password_ok:
+        lockout.fail(db, account)
         limits.hit(db, rule, payload.phone, ip)
         raise AppError("Invalid phone number or password", 401)
     bans.ensure_can_sign_in(db, user)
     limits.reset(db, rule, payload.phone)
+    lockout.succeed(db, account)
     user.last_seen = utcnow()
-    db.commit()
-    _start_session(response, user)
+    _start_session(request, response, db, user)
     return user_out(user)
 
 
 @router.post("/logout", status_code=204)
-def logout(response: Response):
-    clear_session_cookie(response, get_settings().cookie_name)
+def logout(request: Request, response: Response, db: DB):
+    """Ends this session on the server (a copy of the cookie stops working too)."""
+    sessions.revoke_token(db, request.cookies.get(student_cookie()) or _bearer(request), "student")
+    db.commit()
+    clear_session_cookie(response, student_cookie())
+
+
+@router.post("/logout-all", status_code=204)
+def logout_everywhere(response: Response, user: CurrentUser, db: DB):
+    """Sign out everywhere: every session of this account, on every device, ends now."""
+    admin_ops.end_sessions(db, [user.id])  # every session and reset grant; open tabs are told at once
+    db.commit()
+    clear_session_cookie(response, student_cookie())
 
 
 @router.get("/me", response_model=schemas.UserOut)
@@ -102,7 +129,7 @@ def me(user: CurrentUser):
 
 
 @router.post("/demo-login/{user_id}", response_model=schemas.UserOut)
-def demo_login(user_id: str, response: Response, db: DB, _: OptionalUser):
+def demo_login(user_id: PathId, request: Request, response: Response, db: DB, _: OptionalUser):
     """Persona switcher for demos (DEMO_LOGIN=true only): signs in as a seeded student."""
     if not get_settings().demo_login:
         raise AppError("Not found", 404)
@@ -110,7 +137,7 @@ def demo_login(user_id: str, response: Response, db: DB, _: OptionalUser):
     if user is None:
         raise AppError("User not found", 404)
     bans.ensure_can_sign_in(db, user)
-    _start_session(response, user)
+    _start_session(request, response, db, user)
     return user_out(user)
 
 
@@ -136,5 +163,5 @@ def reset_password(payload: schemas.ResetIn, request: Request, response: Respons
     """Sets the new password and signs in with it (older sessions stop working)."""
     limits.hit(db, limits.rule("verify"), None, limits.client_ip(request))
     user = password_reset.reset_password(db, payload.reset_token, payload.password)
-    _start_session(response, user)
+    _start_session(request, response, db, user)
     return user_out(user)

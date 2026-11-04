@@ -3,8 +3,10 @@
 from fastapi import APIRouter, Query
 from sqlalchemy import func, or_, select
 
+from app.services import limits as write_limits
+from app import search as like_text
 from app import schemas
-from app.deps import DB, CurrentUser, OptionalUser
+from app.deps import PathId, DB, CurrentUser, OptionalUser
 from app.models import Group, GroupMember
 from app.serializers import group_out, request_out
 from app.services import groups as rules
@@ -18,10 +20,10 @@ OPEN_WORDS = "open slot open slots vacancy vacancies"
 def list_groups(
     db: DB,
     _: OptionalUser,
-    search: str | None = None,
-    domain: str | None = None,
+    search: str | None = Query(default=None, max_length=100),
+    domain: str | None = Query(default=None, max_length=160),
     openOnly: bool = False,
-    cursor: str | None = None,
+    cursor: str | None = Query(default=None, max_length=12),
     limit: int = Query(default=10, ge=1, le=100),
 ):
     """Public: guests may browse. Search covers title, skills, domain and open seats only."""
@@ -29,11 +31,11 @@ def list_groups(
     stmt = select(Group)
     if search and search.strip():
         q = search.strip().lower()
-        like = f"%{q}%"
+        like = like_text.contains(q)
         conditions = [
-            func.lower(Group.name).like(like),
-            func.lower(Group.domain).like(like),
-            func.lower(func.array_to_string(Group.requirements, "\x1f")).like(like),
+            func.lower(Group.name).like(like, escape=like_text.ESCAPE),
+            func.lower(Group.domain).like(like, escape=like_text.ESCAPE),
+            func.lower(func.array_to_string(Group.requirements, "\x1f")).like(like, escape=like_text.ESCAPE),
         ]
         if q in OPEN_WORDS:
             conditions.append(seats < Group.max_members)
@@ -63,46 +65,49 @@ def my_groups(user: CurrentUser):
 
 
 @router.get("/{group_id}", response_model=schemas.GroupOut)
-def get_group(group_id: str, db: DB, _: CurrentUser):
+def get_group(group_id: PathId, db: DB, _: CurrentUser):
     return group_out(rules.get_group(db, group_id))
 
 
 @router.post("", response_model=schemas.GroupOut, status_code=201)
 def create_group(payload: schemas.GroupCreateIn, db: DB, user: CurrentUser):
+    write_limits.per_account(db, "group_create", user.id)
     group = rules.create_group(db, user, **payload.model_dump())
     db.commit()
     return group_out(group)
 
 
 @router.patch("/{group_id}", response_model=schemas.GroupOut)
-def update_group(group_id: str, payload: schemas.GroupUpdateIn, db: DB, user: CurrentUser):
+def update_group(group_id: PathId, payload: schemas.GroupUpdateIn, db: DB, user: CurrentUser):
+    write_limits.per_account(db, "group_edit", user.id)
     group = rules.update_group(db, rules.get_group(db, group_id), user, payload.model_dump(exclude_unset=True))
     db.commit()
     return group_out(group)
 
 
 @router.delete("/{group_id}", status_code=204)
-def delete_group(group_id: str, db: DB, user: CurrentUser):
+def delete_group(group_id: PathId, db: DB, user: CurrentUser):
     rules.delete_group(db, rules.get_group(db, group_id, lock=True), user)
     db.commit()
 
 
 @router.post("/{group_id}/leave", response_model=schemas.GroupOut | None)
-def leave_group(group_id: str, db: DB, user: CurrentUser):
+def leave_group(group_id: PathId, db: DB, user: CurrentUser):
     group = rules.leave_group(db, rules.get_group(db, group_id, lock=True), user)
     db.commit()
     return group_out(group) if group else None
 
 
 @router.delete("/{group_id}/members/{member_id}", response_model=schemas.GroupOut)
-def remove_member(group_id: str, member_id: str, db: DB, user: CurrentUser):
+def remove_member(group_id: PathId, member_id: PathId, db: DB, user: CurrentUser):
     group = rules.remove_member(db, rules.get_group(db, group_id, lock=True), user, member_id)
     db.commit()
     return group_out(group)
 
 
 @router.post("/{group_id}/join-requests", response_model=schemas.JoinRequestOut, status_code=201)
-def join_request(group_id: str, payload: schemas.NoteIn, db: DB, user: CurrentUser):
+def join_request(group_id: PathId, payload: schemas.NoteIn, db: DB, user: CurrentUser):
+    write_limits.per_account(db, "join_request", user.id)
     req = rules.send_join_request(db, group_id, user, payload.note)
     db.commit()
     return request_out(req)

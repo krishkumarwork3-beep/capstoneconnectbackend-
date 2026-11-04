@@ -49,54 +49,58 @@ def e164(phone_normalized: str) -> str:
 
 
 # ---------------------------------------------------------------------------------------------
-# Signed tokens. Each carries a short fingerprint of the password hash, so changing the password
-# (a reset) signs out every existing session and voids older reset tokens.
+# Signed tokens: HS256 only, with a fixed issuer and one audience per kind, so a student cookie is
+# never accepted as an admin one, nor a reset grant as a session. Each names a server-side row
+# (`sid`, app.services.sessions) that can be revoked, and carries a fingerprint of the password
+# hash as a second check.
 # ---------------------------------------------------------------------------------------------
 
+ALGORITHM = "HS256"
+AUDIENCES = {"student": "capstoneconnect:student", "admin": "capstoneconnect:admin", "reset": "capstoneconnect:reset"}
+REQUIRED_CLAIMS = ["exp", "iat", "iss", "aud", "sub", "sid", "kind"]
+LEEWAY_SECONDS = 30
 
-def _fingerprint(password_hash: str) -> str:
+
+def fingerprint(password_hash: str) -> str:
     return hashlib.sha256(password_hash.encode()).hexdigest()[:16]
 
 
-def _encode(claims: dict, lifetime: timedelta) -> str:
+def encode_token(kind: str, subject_id: str, session_id: str, password_hash: str, lifetime: timedelta) -> str:
     settings = get_settings()
     now = datetime.now(UTC)
-    return jwt.encode({**claims, "iat": now, "exp": now + lifetime}, settings.secret_key, algorithm="HS256")
+    claims = {
+        "iss": settings.jwt_issuer, "aud": AUDIENCES[kind], "sub": subject_id, "sid": session_id,
+        "kind": kind, "pv": fingerprint(password_hash), "iat": now, "exp": now + lifetime,
+    }
+    return jwt.encode(claims, settings.secret_key, algorithm=ALGORITHM)
 
 
-def _decode(token: str, kind: str) -> dict | None:
+def decode_token(token: str, kind: str) -> dict | None:
+    """The claims of a valid token of this kind, else None: wrong algorithm (or "none"), bad
+    signature, wrong issuer or audience, missing or past `exp`, `iat` in the future, wrong kind."""
+    if not token or len(token) > 2000:
+        return None
+    settings = get_settings()
     try:
-        claims = jwt.decode(token, get_settings().secret_key, algorithms=["HS256"])
-    except jwt.PyJWTError:
+        if jwt.get_unverified_header(token).get("alg") != ALGORITHM:
+            return None
+        claims = jwt.decode(
+            token, settings.secret_key, algorithms=[ALGORITHM], audience=AUDIENCES[kind], issuer=settings.jwt_issuer,
+            leeway=LEEWAY_SECONDS, options={"require": REQUIRED_CLAIMS, "verify_signature": True, "verify_exp": True,
+                                            "verify_iat": True, "verify_aud": True, "verify_iss": True},
+        )
+    except (jwt.PyJWTError, ValueError, TypeError):
         return None
-    return claims if claims.get("kind") == kind else None
-
-
-def create_session_token(user_id: str, password_hash: str) -> str:
-    days = get_settings().session_days
-    return _encode({"kind": "session", "sub": user_id, "pv": _fingerprint(password_hash)}, timedelta(days=days))
-
-
-def create_reset_token(user_id: str, password_hash: str) -> str:
-    minutes = get_settings().reset_token_minutes
-    return _encode({"kind": "reset", "sub": user_id, "pv": _fingerprint(password_hash)}, timedelta(minutes=minutes))
-
-
-def create_admin_token(admin_id: str, password_hash: str) -> str:
-    hours = get_settings().admin_session_hours
-    return _encode({"kind": "admin", "sub": admin_id, "pv": _fingerprint(password_hash)}, timedelta(hours=hours))
-
-
-def read_token(token: str, kind: str) -> tuple[str, str] | None:
-    """(user id, password fingerprint) from a valid token of this kind, else None."""
-    claims = _decode(token, kind)
-    if not claims or "sub" not in claims:
+    now = datetime.now(UTC).timestamp()
+    if claims.get("kind") != kind or not isinstance(claims.get("iat"), (int, float)) or claims["iat"] > now + LEEWAY_SECONDS:
         return None
-    return claims["sub"], claims.get("pv", "")
+    if not all(isinstance(claims.get(k), str) and claims[k] for k in ("sub", "sid")):
+        return None
+    return claims
 
 
-def token_matches_password(fingerprint: str, password_hash: str) -> bool:
-    return secrets.compare_digest(fingerprint, _fingerprint(password_hash))
+def token_matches_password(token_fingerprint: str, password_hash: str) -> bool:
+    return secrets.compare_digest(str(token_fingerprint or ""), fingerprint(password_hash))
 
 
 def hash_code(code: str) -> str:

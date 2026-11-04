@@ -8,8 +8,10 @@ from fastapi import APIRouter, BackgroundTasks, File, Query, UploadFile
 from sqlalchemy import String, cast, exists, func, or_, select
 from sqlalchemy.orm import Session
 
+from app.services import limits as write_limits
+from app import search as like_text
 from app import schemas
-from app.deps import DB, CurrentUser
+from app.deps import PathId, DB, CurrentUser
 from app.errors import AppError, not_found
 from app.models import GroupMember, User
 from app.serializers import request_out, user_out
@@ -21,7 +23,7 @@ IN_GROUP_WORDS = "in a group grouped"
 LOOKING_WORDS = "looking for group open"
 
 
-def _get_user(db: Session, user_id: str) -> User:
+def _get_user(db: Session, user_id: PathId) -> User:
     user = db.get(User, user_id)
     if user is None:
         raise not_found("User")
@@ -32,12 +34,12 @@ def _get_user(db: Session, user_id: str) -> User:
 def list_users(
     db: DB,
     me: CurrentUser,
-    search: str | None = None,
-    college: str | None = None,
-    passing_year: int | None = None,
+    search: str | None = Query(default=None, max_length=100),
+    college: str | None = Query(default=None, max_length=160),
+    passing_year: int | None = Query(default=None, ge=1900, le=2200),
     hasGroup: bool | None = None,
     sort: Literal["relevance", "contributions", "name"] = "relevance",
-    cursor: str | None = None,
+    cursor: str | None = Query(default=None, max_length=12),
     limit: int = Query(default=10, ge=1, le=200),
 ):
     """Search covers name, college, graduation year, skills and group status (never bios)."""
@@ -45,12 +47,12 @@ def list_users(
     stmt = select(User)
     if search and search.strip():
         q = search.strip().lower()
-        like = f"%{q}%"
+        like = like_text.contains(q)
         conditions = [
-            func.lower(User.name).like(like),
-            func.lower(User.college).like(like),
-            cast(User.passing_year, String).like(like),
-            func.lower(func.array_to_string(User.skills, "\x1f")).like(like),
+            func.lower(User.name).like(like, escape=like_text.ESCAPE),
+            func.lower(User.college).like(like, escape=like_text.ESCAPE),
+            cast(User.passing_year, String).like(like, escape=like_text.ESCAPE),
+            func.lower(func.array_to_string(User.skills, "\x1f")).like(like, escape=like_text.ESCAPE),
         ]
         if q in IN_GROUP_WORDS:
             conditions.append(in_group)
@@ -86,14 +88,15 @@ def list_users(
 
 
 @router.get("/{user_id}", response_model=schemas.UserOut)
-def get_user(user_id: str, db: DB, me: CurrentUser):
+def get_user(user_id: PathId, db: DB, me: CurrentUser):
     user = _get_user(db, user_id)
     return user_out(user, user.id in groups.phone_visible_ids(db, me, [user.id]))
 
 
 @router.patch("/{user_id}", response_model=schemas.UserOut)
-def update_user(user_id: str, payload: schemas.UserUpdateIn, db: DB, me: CurrentUser):
+def update_user(user_id: PathId, payload: schemas.UserUpdateIn, db: DB, me: CurrentUser):
     """Your own profile only. Name, college and graduation year are fixed at sign-up."""
+    write_limits.per_account(db, "profile_edit", me.id)
     if user_id != me.id:
         raise AppError("You can only edit your own profile", 403)
     changes = payload.model_dump(exclude_unset=True)
@@ -138,14 +141,15 @@ def _apply_github(user: User, url: str | None, wants_verified: bool) -> None:
         user.github_verified = False
         return
     profile, total = result
-    user.github_url = f"https://github.com/{profile['login']}"
+    user.github_url = f"https://github.com/{github._login(profile, username)}"
     user.github_verified = True
     user.github_contribution_count = total
     user.github_synced_at = datetime.now(UTC)
 
 
-@router.post("/{user_id}/avatar")
-async def upload_avatar(user_id: str, db: DB, me: CurrentUser, avatar: UploadFile = File(...)):
+@router.post("/{user_id}/avatar", response_model=schemas.AvatarOut)
+async def upload_avatar(user_id: PathId, db: DB, me: CurrentUser, avatar: UploadFile = File(...)):
+    write_limits.per_account(db, "upload", me.id)
     if user_id != me.id:
         raise AppError("You can only change your own photo", 403)
     path, _, _ = await uploads.save(avatar, "avatar")
@@ -155,8 +159,9 @@ async def upload_avatar(user_id: str, db: DB, me: CurrentUser, avatar: UploadFil
     return {"avatar_url": uploads.public_url(path)}
 
 
-@router.post("/{user_id}/resume")
-async def upload_resume(user_id: str, db: DB, me: CurrentUser, resume: UploadFile = File(...)):
+@router.post("/{user_id}/resume", response_model=schemas.ResumeOut)
+async def upload_resume(user_id: PathId, db: DB, me: CurrentUser, resume: UploadFile = File(...)):
+    write_limits.per_account(db, "upload", me.id)
     if user_id != me.id:
         raise AppError("You can only change your own resume", 403)
     path, _, _ = await uploads.save(resume, "resume")
@@ -167,7 +172,7 @@ async def upload_resume(user_id: str, db: DB, me: CurrentUser, resume: UploadFil
 
 
 @router.get("/{user_id}/github", response_model=schemas.GitHubActivityOut)
-def github_activity(user_id: str, db: DB, _: CurrentUser, background: BackgroundTasks):
+def github_activity(user_id: PathId, db: DB, _: CurrentUser, background: BackgroundTasks):
     """Live from GitHub. A stale all-time total is refreshed in the background."""
     user = _get_user(db, user_id)
     username = github.username_from(user.github_url)
@@ -182,7 +187,8 @@ def github_activity(user_id: str, db: DB, _: CurrentUser, background: Background
 
 
 @router.post("/{user_id}/invitations", response_model=schemas.JoinRequestOut, status_code=201)
-def invite(user_id: str, payload: schemas.InvitationIn, db: DB, me: CurrentUser):
+def invite(user_id: PathId, payload: schemas.InvitationIn, db: DB, me: CurrentUser):
+    write_limits.per_account(db, "invitation", me.id)
     req = groups.send_invitation(db, user_id, payload.group_id, me, payload.note)
     db.commit()
     return request_out(req)

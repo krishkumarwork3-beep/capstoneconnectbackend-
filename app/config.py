@@ -22,6 +22,8 @@ class Settings(BaseSettings):
 
     # Signs session cookies and password-reset tokens. Must be long and random in production.
     secret_key: str = Field(default=DEV_SECRET_KEY, min_length=32)
+    # The "iss" of every token this API signs (and the only one it accepts).
+    jwt_issuer: str = Field(default="capstoneconnect", min_length=1, max_length=100)
     session_days: int = 14
     # Cookies need Secure over HTTPS (production); local http://localhost needs it off.
     cookie_secure: bool = False
@@ -38,6 +40,18 @@ class Settings(BaseSettings):
     trusted_proxy_ips: str = ""
     # How many reports one student may send in 24 hours.
     reports_per_day: int = 10
+    # Host headers the API answers to (others get 400): the API's own name(s), e.g.
+    # ["api.example.com"]. Stops Host-header tricks (cache poisoning, poisoned links).
+    allowed_hosts: list[str] = ["localhost", "127.0.0.1", "::1"]
+    # Request limits (app.guard): bodies, JSON shape.
+    max_json_body_bytes: int = 1_000_000
+    max_upload_body_bytes: int = 6_000_000
+    max_json_depth: int = 32
+    max_json_array: int = 5_000
+    # The longest any single database statement may run (milliseconds).
+    db_statement_timeout_ms: int = Field(default=15_000, ge=100, le=600_000)
+    # Live sockets one API process holds at most (each account: 10).
+    ws_max_sockets: int = Field(default=2_000, ge=1)
     # Tests only: /api/health also reports which worker process answered.
     expose_worker_pid: bool = False
 

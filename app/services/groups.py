@@ -336,23 +336,32 @@ def send_invitation(db: Session, target_id: str, group_id: str, sender: User, no
 
 
 def _get_request(db: Session, request_id: str) -> JoinRequest:
-    req = db.get(JoinRequest, request_id, with_for_update={"of": JoinRequest})
+    req = db.get(JoinRequest, request_id, with_for_update={"of": JoinRequest}, populate_existing=True)
     if req is None:
         raise not_found("Request")
     return req
 
 
 def respond_request(db: Session, request_id: str, status: str, actor: User) -> JoinRequest:
+    """Locks in one fixed order, everywhere: the group, then the student, then the request. (Two
+    accepts that each locked their request first and then the group deadlocked: found by the
+    race tests.) Each row is re-read under its lock."""
+    if status not in ("accepted", "declined", "withdrawn", "cancelled"):
+        raise AppError("Choose accept or decline")
+    peek = db.get(JoinRequest, request_id)
+    if peek is None:
+        raise not_found("Request")
+    group = get_group(db, peek.group_id, lock=True) if peek.group_id else None
+    student_id = peek.sender_id if peek.type == "join_request" else peek.receiver_id
+    if student_id:
+        db.get(User, student_id, with_for_update={"of": User}, populate_existing=True)
     req = _get_request(db, request_id)
     if status == "withdrawn":
         return withdraw_request(db, req, actor)
     if status == "cancelled":
         return cancel_invitation(db, req, actor)
-    if status not in ("accepted", "declined"):
-        raise AppError("Choose accept or decline")
-    if req.group_id is None:
+    if req.group_id is None or group is None:
         raise not_found("Group")
-    group = get_group(db, req.group_id, lock=True)
     if req.status != "pending":
         raise AppError("Only pending items can be updated", 409)
     if req.type == "invitation":
@@ -364,6 +373,7 @@ def respond_request(db: Session, request_id: str, status: str, actor: User) -> J
     student = db.get(User, req.sender_id if req.type == "join_request" else req.receiver_id)
     if student is None:
         raise not_found("User")
+    db.refresh(student, ["membership"])  # another group may have taken them a moment ago
 
     if status == "declined":
         req.status = "declined"

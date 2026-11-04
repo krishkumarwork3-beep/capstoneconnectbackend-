@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from app.services import github
+from tests.conftest import REAL_PNG
 
 
 def test_discover_search_filters_and_sorts(as_user):
@@ -71,7 +72,7 @@ def test_uploads_check_content(as_user):
     c = as_user("usr_8")
     fake = c.post("/api/users/usr_8/avatar", files={"avatar": ("me.png", b"not really a png", "image/png")})
     assert fake.status_code == 415
-    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+    png = REAL_PNG  # a real image: uploads are decoded and re-encoded
     ok = c.post("/api/users/usr_8/avatar", files={"avatar": ("me.png", png, "image/png")})
     assert ok.status_code == 200 and ok.json()["avatar_url"].endswith(".png")
     assert c.get("/api/auth/me").json()["avatar_url"] == ok.json()["avatar_url"]
@@ -95,7 +96,7 @@ def test_chat_visibility_unread_and_direct(as_user):
     again = outsider.post("/api/conversations/direct", json={"user_id": "usr_1"}).json()
     assert direct["id"] == again["id"] and direct["title"] == "Aarav Sharma"
     assert outsider.post("/api/conversations/direct", json={"user_id": "usr_8"}).status_code == 400
-    uploaded = outsider.post("/api/uploads/attachments", files={"file": ("cv.pdf", b"%PDF-1.4 cv", "application/pdf")}).json()
+    uploaded = outsider.post("/api/uploads/attachments", files={"file": ("cv.pdf", b"%PDF-1.4 cv\n%%EOF", "application/pdf")}).json()
     with_file = outsider.post(
         f"/api/conversations/{direct['id']}/messages", json={"text": "", "attachment": uploaded}
     ).json()

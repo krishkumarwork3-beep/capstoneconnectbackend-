@@ -12,7 +12,7 @@ from app.passwords import password_problem
 from tests.conftest import PASSWORD, PHONES
 
 LEAD, MEMBER, LOOKING, OTHER = "usr_1", "usr_9", "usr_6", "usr_8"
-PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+PNG = __import__("tests.conftest", fromlist=["REAL_PNG"]).REAL_PNG  # a real 8x8 image (uploads are re-encoded)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -74,7 +74,8 @@ EXTRA_WRITES: dict = {
     ("PATCH", "/api/admin/announcements/{announcement_id}"): lambda ids: (f"/api/admin/announcements/{ids['announcement']}", {"text": "Edited"}),
     ("DELETE", "/api/admin/announcements/{announcement_id}"): lambda ids: (f"/api/admin/announcements/{ids['announcement']}", None),
 }
-NOT_DATA_WRITES = {("POST", "/api/admin/auth/login"), ("POST", "/api/admin/auth/logout")}
+# Signing yourself in or out (also everywhere: any admin, viewers too, may end their own sessions).
+NOT_DATA_WRITES = {("POST", "/api/admin/auth/login"), ("POST", "/api/admin/auth/logout"), ("POST", "/api/admin/auth/logout-all")}
 
 
 def test_every_admin_route_needs_an_admin(client, as_user):
@@ -225,9 +226,9 @@ def test_message_history_is_paged(as_user, monkeypatch):
 def test_attachment_size_is_the_real_one(as_user):
     lead = as_user(LEAD)
     conv = next(c["id"] for c in lead.get("/api/conversations").json() if c["type"] == "group")
-    att = lead.post("/api/uploads/attachments", files={"file": ("a.pdf", b"%PDF-1.4 hello", "application/pdf")}).json()
+    att = lead.post("/api/uploads/attachments", files={"file": ("a.pdf", b"%PDF-1.4 hello\n%%EOF", "application/pdf")}).json()
     sent = lead.post(f"/api/conversations/{conv}/messages", json={"text": "", "attachment": {**att, "size": 999999999}}).json()
-    assert sent["attachment"]["size"] == len(b"%PDF-1.4 hello")
+    assert sent["attachment"]["size"] == len(b"%PDF-1.4 hello\n%%EOF")
 
 
 def test_conflicting_writes_are_a_clean_409(as_user, monkeypatch):

@@ -29,18 +29,53 @@ COMMON = frozenset(
 )
 
 
+# The words behind most breached passwords: "P@ssw0rd2024", "Qwerty@123", "india@2025" and the
+# like are these with leetspeak, capitals and a year or symbols around them.
+BASES = frozenset(
+    """
+    password passwd qwerty qwertyuiop asdf asdfgh asdfghjkl zxcvbnm iloveyou welcome letmein admin
+    administrator india bharat cricket capstone capstoneconnect student college engineer engineering
+    krishna ganesh sairam omsairam jaihind hindustan sunshine princess football baseball superman
+    batman starwars dragon monkey master shadow michael jennifer computer internet samsung changeme
+    default root test secret login hello freedom whatever trustno love google iphone mumbai delhi
+    pune chennai kolkata bangalore hyderabad abc abcd abcdef abcdefgh
+    """.split()
+)
+_LEET = str.maketrans({"0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t", "@": "a", "$": "s", "8": "b"})
+_DECORATION = "0123456789!@#$%^&*()-_=+[]{};:'\",.<>/?\\|`~ "
+_WALKS = ("abcdefghijklmnopqrstuvwxyz", "qwertyuiopasdfghjklzxcvbnm", "1234567890", "0987654321", "1qaz2wsx3edc4rfv")
+
+
+def _guessable(password: str) -> bool:
+    lowered = password.lower()
+    if len(set(lowered)) <= 3:
+        return True  # "aaaabbbb", "11112222"
+    for unit in (1, 2, 3):
+        if len(lowered) % unit == 0 and lowered == lowered[:unit] * (len(lowered) // unit):
+            return True  # "abababab"
+    if lowered.isdigit() and len(lowered) < 12:
+        return True  # dates, phone-like and other short numbers
+    core = lowered.strip(_DECORATION)
+    for candidate in (core, core.translate(_LEET), lowered.translate(_LEET).strip(_DECORATION)):
+        if candidate in BASES or candidate in COMMON:
+            return True
+        if len(candidate) >= 4 and any(candidate in walk or candidate in walk[::-1] for walk in _WALKS):
+            return True  # keyboard and alphabet runs, with or without digits around them
+    return False
+
+
 def password_problem(password: str, phone: str | None = None) -> str | None:
     """Why this password can't be used, or None."""
     if len(password) < MIN_PASSWORD_LENGTH:
         return f"Use at least {MIN_PASSWORD_LENGTH} characters"
-    lowered = password.lower()
-    if lowered in COMMON or re.fullmatch(r"(.)\1+", password):
-        return "That password is too common. Pick one that is harder to guess"
     if phone:
         digits = normalize_phone(phone)
         typed = re.sub(r"\D", "", password)
         if len(typed) >= 8 and (typed in digits or digits.endswith(typed)):
             return "Don't use your phone number as your password"
+    lowered = password.lower()
+    if lowered in COMMON or re.fullmatch(r"(.)\1+", password) or _guessable(password):
+        return "That password is too common. Pick one that is harder to guess"
     return None
 
 

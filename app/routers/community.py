@@ -5,9 +5,10 @@ from datetime import timedelta
 from typing import Literal
 
 from fastapi import APIRouter
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, or_, select
 
+from app.services import limits as write_limits
 from app.config import get_settings
 from app.deps import DB, CurrentUser
 from app.errors import AppError, not_found
@@ -28,6 +29,8 @@ REASONS: dict[str, str] = {
 
 
 class ReportIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     target_type: Literal["user", "group", "message"]
     target_id: str = Field(min_length=1, max_length=40)
     reason: ReportReason
@@ -84,6 +87,7 @@ def _target(db, me: User, payload: ReportIn) -> tuple[str | None, str, str | Non
 @router.post("/reports", response_model=ReportOut, status_code=201)
 def create_report(payload: ReportIn, db: DB, me: CurrentUser):
     """Report a student, a group or a message you can see. Once per thing; a few a day."""
+    write_limits.per_account(db, "report", me.id)
     since = utcnow() - timedelta(days=1)
     today = db.scalar(select(func.count()).select_from(Report).where(Report.reporter_id == me.id, Report.created_at >= since)) or 0
     if today >= get_settings().reports_per_day:

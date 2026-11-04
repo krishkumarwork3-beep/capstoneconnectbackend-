@@ -17,6 +17,7 @@ from fastapi import UploadFile
 from app.config import get_settings
 from app.errors import AppError
 from app.security import new_id
+from app.services import upload_checks
 from app.services.storage import get_storage
 
 MB = 1024 * 1024
@@ -109,9 +110,16 @@ async def save(upload: UploadFile, purpose: str) -> tuple[str, str, int]:
     kind = _kind_of(data[:8])
     if kind not in allowed:
         raise AppError(f"That file type is not supported. Upload {what}.", 415)
-    name = upload.filename or f"file.{kind}"
+    name = upload_checks.clean_filename(upload.filename, f"file.{kind}")
     # A .docx is a ZIP inside; keep its own extension so it opens in Word.
     ext = "docx" if kind == "zip" and name.lower().endswith(".docx") else kind
+    # The content itself (app.services.upload_checks): images re-encoded, PDFs and archives inspected.
+    if kind in ("png", "jpg"):
+        data = upload_checks.reencode_image(data, kind)
+    elif kind == "pdf":
+        upload_checks.check_pdf(data)
+    else:
+        upload_checks.check_zip(data, docx=ext == "docx")
     stored = f"{new_id(purpose[:3])}.{ext}"
     get_storage().put(f"{purpose}/{stored}", data, MEDIA[ext])
     return path_of(purpose, stored), name, len(data)

@@ -102,3 +102,31 @@ def reset(db: Session, rule_: Rule, phone: str) -> None:
     db.execute(delete(RateLimit).where(RateLimit.key == f"{rule_.action}:phone:{normalize_phone(phone)}"))
     db.commit()
 
+
+
+# ---------------------------------------------------------------------------------------------
+# Per-account write limits: generous for a person, a wall for a script. Counted in the same
+# table, so every worker shares them. (Reports also have their own per-day cap.)
+# ---------------------------------------------------------------------------------------------
+
+WRITE_LIMITS: dict[str, tuple[int, timedelta]] = {
+    "message": (60, timedelta(minutes=1)),
+    "join_request": (20, timedelta(hours=1)),
+    "invitation": (30, timedelta(hours=1)),
+    "recommendation": (30, timedelta(hours=1)),
+    "group_create": (5, timedelta(days=1)),
+    "group_edit": (60, timedelta(hours=1)),
+    "profile_edit": (30, timedelta(hours=1)),
+    "upload": (30, timedelta(hours=1)),
+    "report": (20, timedelta(hours=1)),
+    "github_lookup": (30, timedelta(minutes=10)),  # per account or, signed out, per IP address
+}
+
+
+def per_account(db: Session, action: str, who: str) -> None:
+    """Counts one write for this account (or address) and refuses (429) once over the limit."""
+    limit, window = WRITE_LIMITS[action]
+    count, start = db.execute(_HIT, {"key": f"{action}:who:{who}", "window": window}).one()
+    db.commit()
+    if count > limit:
+        raise _refuse(start + window - datetime.now(UTC))

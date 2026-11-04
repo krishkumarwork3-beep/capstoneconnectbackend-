@@ -19,17 +19,14 @@ from app.config import get_settings
 from app.errors import AppError
 from app.models import PasswordResetCode, User
 from app.passwords import ensure_good_password
-from app.services import bans, limits
+from app.services import bans, limits, sessions
 from app.security import (
-    create_reset_token,
     e164,
     hash_code,
     hash_password,
     new_code,
     new_id,
     normalize_phone,
-    read_token,
-    token_matches_password,
 )
 from app.services.sms import SmsError, send_sms
 
@@ -117,30 +114,48 @@ def verify_code(db: Session, phone: str, code: str) -> str:
     if user is None or record is None or record.used_at is not None or record.expires_at <= now:
         raise AppError(WRONG_CODE, 400)
 
-    record.attempts += 1
-    if record.attempts > settings.otp_max_attempts:
-        record.used_at = now
+    # Counted with one atomic UPDATE, so guesses sent in parallel can't get past the limit.
+    attempts = db.execute(
+        update(PasswordResetCode).where(PasswordResetCode.id == record.id, PasswordResetCode.used_at.is_(None))
+        .values(attempts=PasswordResetCode.attempts + 1).returning(PasswordResetCode.attempts)
+    ).scalar_one_or_none()
+    if attempts is None or attempts > settings.otp_max_attempts:
+        db.execute(update(PasswordResetCode).where(PasswordResetCode.id == record.id).values(used_at=now))
         db.commit()
         raise AppError(WRONG_CODE, 400)
     if not secrets.compare_digest(record.code_hash, hash_code(code.strip())):
-        if record.attempts >= settings.otp_max_attempts:
-            record.used_at = now  # used up
+        if attempts >= settings.otp_max_attempts:
+            db.execute(update(PasswordResetCode).where(PasswordResetCode.id == record.id).values(used_at=now))  # used up
         db.commit()
         raise AppError(WRONG_CODE, 400)
 
-    record.used_at = now
+    # Spent atomically: the same code can't be turned into two reset grants.
+    spent = db.execute(
+        update(PasswordResetCode).where(PasswordResetCode.id == record.id, PasswordResetCode.used_at.is_(None))
+        .values(used_at=now).returning(PasswordResetCode.id)
+    ).scalar_one_or_none()
+    if spent is None:
+        db.commit()
+        raise AppError(WRONG_CODE, 400)
+    token = sessions.start(db, "reset", user.id, user.password_hash, timedelta(minutes=settings.reset_token_minutes))
     db.commit()
-    return create_reset_token(user.id, user.password_hash)
+    return token
 
 
 def reset_password(db: Session, token: str, password: str) -> User:
-    read = read_token(token, "reset")
-    user = db.get(User, read[0]) if read else None
-    # The token carries the old password's fingerprint, so it works once and only until a change.
-    if not read or user is None or not token_matches_password(read[1], user.password_hash):
+    # Checked before the grant is spent, so a weak password doesn't use it up.
+    claims_user = sessions.resolve(db, token, "reset")
+    user = db.get(User, claims_user[0]) if claims_user else None
+    if user is None or not sessions.check_password(claims_user[2], user.password_hash):
         raise AppError("This reset link has expired. Start again.", 400)
     bans.ensure_can_sign_in(db, user)
     ensure_good_password(password, user.phone)
+    # Single use: spent with one atomic UPDATE (two requests racing with one grant: one wins).
+    if sessions.spend_reset(db, token) is None:
+        db.rollback()
+        raise AppError("This reset link has expired. Start again.", 400)
     user.password_hash = hash_password(password)
+    # Every other session and reset grant ends; the caller signs in with the new password.
+    sessions.end_everything(db, "student", [user.id])
     db.commit()
     return user

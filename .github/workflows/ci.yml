@@ -33,7 +33,13 @@ jobs:
           uv run alembic upgrade head
           uv run alembic check
       - name: Tests
-        run: uv run pytest -q
+        run: uv run pytest -q --ignore=tests/attacks
+      - name: Attack tests (fuzzing, injection, auth, sessions, races, SSRF, uploads, abuse)
+        run: uv run pytest -q tests/attacks
+      - name: No known vulnerabilities in runtime dependencies (fails on any finding)
+        run: |
+          uv export --frozen --no-dev --no-hashes --format requirements-txt > requirements-audit.txt
+          uvx pip-audit==2.9.0 -r requirements-audit.txt --no-deps --disable-pip --strict
       - name: Unsafe-settings check works (exits 1 on this CI's development settings)
         run: "! uv run python -m app.check_config"
       - name: The image builds

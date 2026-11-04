@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from app.db import SessionLocal
 from app.models import AdminUser, AuditLog
+from app.services import lockout, sessions
 from app.security import MIN_PASSWORD_LENGTH, hash_password, new_id
 from app.services.admin import create_admin
 
@@ -54,6 +55,8 @@ def main() -> None:
                 sys.exit(f"No admin with the email {args.email}")
             admin.password_hash = hash_password(_password())
             admin.active = True
+            sessions.revoke_all(db, "admin", [admin.id])  # and a lock-out from failed attempts goes
+            lockout.succeed(db, lockout.admin_key(admin.email))
             summary = f"Set a new password for {admin.email} from the command line"
         db.add(AuditLog(id=new_id("aud"), admin_email="command line", action=f"admin.{args.command}", target_type="admin",
                         target_id=admin.id, summary=summary))

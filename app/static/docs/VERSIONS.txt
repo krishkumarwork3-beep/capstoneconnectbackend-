@@ -1,0 +1,1 @@
+Swagger UI 5.34.1 (swagger-ui-dist) and ReDoc 2.5.4 (redoc), from the npm registry, served by the API itself for /docs and /redoc (no third-party CDN). Update: npm pack both, copy these files.

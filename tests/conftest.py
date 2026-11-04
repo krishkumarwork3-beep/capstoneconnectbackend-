@@ -33,6 +33,8 @@ os.environ["GITHUB_TOKEN"] = ""
 os.environ["DEMO_LOGIN"] = "true"
 os.environ["UPLOAD_DIR"] = str(ROOT / ".pytest_cache" / "uploads")
 # Tests create their own admins (admin_client); no first admin from .env.
+# The test client's Host header.
+os.environ["ALLOWED_HOSTS"] = '["localhost","127.0.0.1","testserver"]'
 os.environ["ADMIN_EMAIL"] = ""
 os.environ["ADMIN_PASSWORD"] = ""
 
@@ -48,6 +50,21 @@ from app.services.admin import create_admin, reset_lockouts  # noqa: E402
 assert "_test" in str(engine.url.database), "tests must not run against the development database"
 
 PASSWORD = "password123"
+
+
+def _real_png() -> bytes:
+    import io
+
+    from PIL import Image
+
+    out = io.BytesIO()
+    Image.new("RGB", (8, 8), (40, 120, 200)).save(out, format="PNG")
+    return out.getvalue()
+
+
+# Uploads are decoded and re-encoded (app.services.upload_checks), so fixtures are real files.
+REAL_PNG = _real_png()
+REAL_PDF = b"%PDF-1.4\n1 0 obj << /Type /Catalog >>\nendobj\n%%EOF\n"
 PHONES = {
     "usr_1": "+91 98765 43210",  # Group Lead, grp_1 (4 seats, 3 taken)
     "usr_2": "+91 98123 45678",  # Group Lead, grp_2
@@ -71,7 +88,7 @@ def schema():
 @pytest.fixture(autouse=True)
 def demo_data(schema):
     with SessionLocal() as db:
-        db.execute(text(f"TRUNCATE {TABLES}, admin_users, banned_phones, audit_log, rate_limits, reports, announcements CASCADE"))
+        db.execute(text(f"TRUNCATE {TABLES}, admin_users, banned_phones, audit_log, rate_limits, reports, announcements, auth_sessions, login_lockouts CASCADE"))
         db.commit()
         seed(db)
     reset_lockouts()

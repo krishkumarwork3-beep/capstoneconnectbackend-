@@ -8,10 +8,11 @@ The bytes come from the configured storage (local disk or S3-compatible). Names 
 against the stored-name pattern before storage is touched, so `..` and other paths are refused.
 """
 
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Request, Response
+from fastapi import Path as PathParam
 from sqlalchemy import or_, select
 
 from app.deps import DB, OptionalUser, current_admin
@@ -40,7 +41,8 @@ def _disposition(inline: bool, filename: str, fallback: str) -> str:
 
 
 @router.get("/{purpose}/{name}")
-def get_file(purpose: Literal["avatar", "resume", "attachment"], name: str, request: Request, db: DB, user: OptionalUser):
+def get_file(purpose: Literal["avatar", "resume", "attachment"], name: Annotated[str, PathParam(max_length=64)], request: Request,
+             db: DB, user: OptionalUser):
     if not uploads.is_ours(purpose, name):
         raise not_found("File")
 
@@ -71,16 +73,16 @@ def get_file(purpose: Literal["avatar", "resume", "attachment"], name: str, requ
     if data is None:
         raise not_found("File")
     ext = name.rsplit(".", 1)[1]
-    # Chat attachments download under their original name (the chat's link asks for a download,
-    # which browsers only honour from the server for a link to another origin); photos and
-    # résumés open in the browser.
-    inline = purpose != "attachment" and ext in ("png", "jpg", "pdf")
+    # Always a download (never rendered as a page of this origin), with a fixed type from the
+    # stored extension, nosniff, and a sandbox that would neuter any script even if a browser did
+    # render it. <img> tags still show avatars: Content-Disposition does not affect embedding.
     return Response(
         content=data,
         media_type=uploads.MEDIA[ext],
         headers={
-            "Content-Disposition": _disposition(inline, filename, name),
+            "Content-Disposition": _disposition(False, filename, name),
             "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
             "Cache-Control": "public, max-age=86400" if purpose == "avatar" else "private, no-store",
         },
     )

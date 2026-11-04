@@ -107,6 +107,23 @@ class Hub:
             self._by_user[conn.user_id].add(conn)
             return first
 
+    def try_add(self, conn: Connection, per_user: int, total: int) -> bool | None:
+        """Like add(), but None (and nothing added) when this user already has `per_user`
+        sockets here or the process holds `total`: one account can't exhaust the server."""
+        with self._lock:
+            mine = self._by_user.get(conn.user_id, set())
+            if len(mine) >= per_user or sum(len(s) for s in self._by_user.values()) >= total:
+                return None
+            first = not mine
+            self._by_user[conn.user_id].add(conn)
+            return first
+
+    def count(self, user_id: str | None = None) -> int:
+        with self._lock:
+            if user_id is not None:
+                return len(self._by_user.get(user_id, ()))
+            return sum(len(s) for s in self._by_user.values())
+
     def remove(self, conn: Connection) -> bool:
         """True when it was the user's last socket here."""
         with self._lock:

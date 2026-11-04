@@ -2,21 +2,22 @@
 
 from typing import Annotated
 
-from fastapi import Depends, Request
+from fastapi import Depends, Path, Request
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
 from app.db import get_db
 from app.errors import AppError
 from app.models import AdminUser, User
-from app.security import read_token, token_matches_password
-from app.services import bans
+from app.cookies import admin_cookie, student_cookie
+from app.services import bans, sessions
 
 DB = Annotated[Session, Depends(get_db)]
+# Every id in a URL: bounded (our ids are "usr_" + 16 hex characters).
+PathId = Annotated[str, Path(min_length=1, max_length=64)]
 
 
 def _token_from(request: Request) -> str | None:
-    cookie = request.cookies.get(get_settings().cookie_name)
+    cookie = request.cookies.get(student_cookie())
     if cookie:
         return cookie
     header = request.headers.get("authorization", "")
@@ -27,18 +28,22 @@ def _token_from(request: Request) -> str | None:
 
 def optional_user(request: Request, db: DB) -> User | None:
     token = _token_from(request)
-    if not token:
+    found = sessions.resolve(db, token, "student")
+    if not found:
+        # Ended because of a suspension: say so (403) rather than a bare "sign in" (401).
+        subject = sessions.claimed_subject(token, "student") if token else None
+        user = db.get(User, subject) if subject else None
+        if user is not None:
+            bans.ensure_can_sign_in(db, user)
         return None
-    read = read_token(token, "session")
-    if not read:
-        return None
-    user_id, fingerprint = read
+    user_id, session_id, fingerprint = found
     user = db.get(User, user_id)
-    # A password change (reset) invalidates every session issued before it.
-    if not user or not token_matches_password(fingerprint, user.password_hash):
+    # A password change invalidates every session issued before it (the rows are revoked too).
+    if not user or not sessions.check_password(fingerprint, user.password_hash):
         return None
     # Suspended (or on a blocked number) in the admin portal: signed out at once.
     bans.ensure_can_sign_in(db, user)
+    request.state.session_id = session_id
     return user
 
 
@@ -58,12 +63,12 @@ OptionalUser = Annotated[User | None, Depends(optional_user)]
 
 
 def current_admin(request: Request, db: DB) -> AdminUser:
-    token = request.cookies.get(get_settings().admin_cookie_name)
-    read = read_token(token, "admin") if token else None
-    admin = db.get(AdminUser, read[0]) if read else None
-    # A password change or deactivation ends the admin's sessions.
-    if admin is None or not admin.active or not token_matches_password(read[1], admin.password_hash):
+    found = sessions.resolve(db, request.cookies.get(admin_cookie()), "admin")
+    admin = db.get(AdminUser, found[0]) if found else None
+    # A password change, deactivation or log-out ends the admin's sessions.
+    if admin is None or not admin.active or not sessions.check_password(found[2], admin.password_hash):
         raise AppError("Sign in to the admin portal", 401)
+    request.state.admin_session_id = found[1]
     return admin
 
 

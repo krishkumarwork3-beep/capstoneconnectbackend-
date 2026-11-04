@@ -10,8 +10,8 @@ from app.main import app
 from tests.conftest import PASSWORD, PHONES
 
 LEAD, MEMBER, LOOKING, OTHER = "usr_1", "usr_9", "usr_6", "usr_8"
-PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
-PDF = b"%PDF-1.4\n" + b"0" * 64
+PNG = __import__("tests.conftest", fromlist=["REAL_PNG"]).REAL_PNG  # a real 8x8 image (uploads are re-encoded)
+PDF = b"%PDF-1.4\n" + b"0" * 64 + b"\n%%EOF\n"
 
 
 def actions(admin) -> list[str]:
@@ -166,7 +166,8 @@ def test_avatars_are_public_resumes_need_a_sign_in(as_user, client):
     assert guest.get(_path(resume)).status_code == 401
     r = as_user(LEAD).get(_path(resume))
     assert r.status_code == 200 and r.content == PDF and "no-store" in r.headers["cache-control"]
-    assert r.headers["content-disposition"].startswith("inline")  # opens in the browser
+    # Always a download now (never rendered on the API's origin), with a sandbox CSP.
+    assert r.headers["content-disposition"].startswith("attachment")
 
 
 def test_attachments_are_only_for_the_conversation(as_user, admin_client):

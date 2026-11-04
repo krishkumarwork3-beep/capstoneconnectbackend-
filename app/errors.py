@@ -9,7 +9,8 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from sqlalchemy.exc import IntegrityError
+import psycopg
+from sqlalchemy.exc import DataError, IntegrityError, OperationalError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 RULE_ERRORS = {
@@ -47,6 +48,21 @@ def install_error_handlers(app: FastAPI) -> None:
     async def _http_error(_: Request, exc: StarletteHTTPException):
         message = exc.detail if isinstance(exc.detail, str) else "Request failed"
         return JSONResponse({"message": message}, status_code=exc.status_code)
+
+    @app.exception_handler(DataError)
+    async def _bad_value(_: Request, exc: DataError):
+        # A value the database can't store (a number out of range, an invalid character) that
+        # validation let through: the caller's mistake, never a 500.
+        logging.getLogger("app.errors").warning("Database refused a value: %s", type(exc.orig).__name__)
+        return JSONResponse({"message": "A value in the request is not valid"}, status_code=400)
+
+    @app.exception_handler(OperationalError)
+    async def _busy(_: Request, exc: OperationalError):
+        # A statement cut off by the statement timeout, or two transactions deadlocked: retryable.
+        if isinstance(exc.orig, (psycopg.errors.QueryCanceled, psycopg.errors.DeadlockDetected, psycopg.errors.LockNotAvailable)):
+            logging.getLogger("app.errors").warning("Database busy: %s", type(exc.orig).__name__)
+            return JSONResponse({"message": "The server is busy. Try again in a moment."}, status_code=503, headers={"Retry-After": "2"})
+        raise exc
 
     @app.exception_handler(IntegrityError)
     async def _conflict(_: Request, exc: IntegrityError):
