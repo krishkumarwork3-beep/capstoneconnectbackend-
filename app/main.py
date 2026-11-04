@@ -1,19 +1,19 @@
 """FastAPI application: CORS for the frontend, the API under /api (with the live socket at /api/ws),
-uploads under /uploads."""
+uploads under /uploads (app.routers.files)."""
 
 import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from app import realtime
+from app.check_config import startup_check
 from app.services.admin import ensure_first_admin
 from app.config import get_settings
 from app.errors import install_error_handlers
-from app.routers import admin, auth, chat, groups, requests, system, users
+from app.routers import admin, auth, chat, files, groups, requests, system, users
 from app.routers import realtime as realtime_router
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -23,6 +23,8 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    # Refuses to run a secure (HTTPS) deployment with development settings (app.check_config).
+    startup_check(settings)
     # The thread that LISTENs for events from every worker (see app.realtime).
     await run_in_threadpool(realtime.start)
     # The first admin from ADMIN_EMAIL / ADMIN_PASSWORD, if set and not created yet.
@@ -47,4 +49,5 @@ for router in (auth.router, users.router, groups.router, requests.router, chat.r
     app.include_router(router, prefix=settings.api_prefix)
 
 settings.upload_dir.mkdir(parents=True, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=settings.upload_dir), name="uploads")
+# Avatars are public; résumés and chat attachments are checked (app.routers.files).
+app.include_router(files.router)

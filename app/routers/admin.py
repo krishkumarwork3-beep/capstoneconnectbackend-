@@ -29,12 +29,13 @@ from app.models import (
     GroupMember,
     JoinRequest,
     Message,
+    Recommendation,
     User,
     utcnow,
 )
 from app.security import create_admin_token, hash_password, new_id, normalize_phone, verify_password
 from app.services import admin as ops
-from app.services import github
+from app.services import github, uploads
 from app.services import groups as rules
 
 router = APIRouter(prefix="/admin")
@@ -401,6 +402,25 @@ def delete_student(user_id: str, admin: AdminWriter, db: DB):
     db.commit()
 
 
+@students.delete("/users/{user_id}/{kind}", response_model=s.StudentDetail)
+def remove_student_file(user_id: str, kind: Literal["avatar", "resume"], admin: AdminWriter, db: DB):
+    """Removes a student's photo or résumé, and deletes the file from disk."""
+    user = _student(db, user_id)
+    url = user.avatar_url if kind == "avatar" else user.resume_url
+    if not url:
+        raise AppError(f"{user.name} has no {'photo' if kind == 'avatar' else 'résumé'}", 409)
+    deleted = uploads.remove(url)
+    if kind == "avatar":
+        user.avatar_url = None
+    else:
+        user.resume_url = None
+    what = "photo" if kind == "avatar" else "résumé"
+    ops.record(db, admin, f"user.remove_{kind}", f"Removed {user.name}'s {what}", "user", user.id,
+               {"url": url, "file_deleted": deleted})
+    db.commit()
+    return ops.student_detail(db, user)
+
+
 @students.post("/users/bulk", response_model=s.BulkOut)
 def bulk_students(payload: s.BulkIn, admin: AdminWriter, db: DB):
     """Suspend, lift suspension or delete many students at once."""
@@ -566,6 +586,33 @@ def get_group(group_id: str, _: CurrentAdmin, db: DB):
     )
 
 
+@groups_router.patch("/groups/{group_id}", response_model=s.GroupDetail)
+def edit_group(group_id: str, payload: s.GroupEditIn, admin: AdminWriter, db: DB):
+    """Name, description, domain and requirements (the size can't change)."""
+    group = _group(db, group_id)
+    changes = payload.model_dump(exclude_unset=True, exclude_none=True)
+    if not changes:
+        raise AppError("Nothing to change", 422)
+    before = {key: getattr(group, key) for key in changes}
+    rules.apply_group_changes(db, group, changes)
+    ops.record(db, admin, "group.edit", f"Edited group {group.name} ({', '.join(changes)})", "group", group.id,
+               {"before": {k: list(v) if isinstance(v, list) else v for k, v in before.items()}, "after": changes})
+    db.commit()
+    return get_group(group.id, admin, db)
+
+
+@groups_router.post("/groups/{group_id}/lead", response_model=s.GroupDetail)
+def make_lead(group_id: str, payload: s.LeadIn, admin: AdminWriter, db: DB):
+    """Makes another member the Group Lead (the old lead stays as a member)."""
+    group = _group(db, group_id)
+    old = next((m.user.name for m in group.members if m.role == "admin"), None)
+    new = rules.transfer_lead(db, group, payload.user_id)
+    ops.record(db, admin, "group.transfer_lead", f"Made {new.user.name} Group Lead of {group.name}", "group", group.id,
+               {"from": old, "to": new.user_id})
+    db.commit()
+    return get_group(group.id, admin, db)
+
+
 @groups_router.delete("/groups/{group_id}", status_code=204)
 def delete_group(group_id: str, admin: AdminWriter, db: DB):
     """Deletes the group and its chat; members become free to join another group."""
@@ -637,6 +684,31 @@ def cancel_requests(payload: s.IdsIn, admin: AdminWriter, db: DB):
         ops.record(db, admin, "request.bulk_cancel", f"Cancelled {done} request(s)", "request", None, {"ids": payload.ids})
     db.commit()
     return {"done": done, "skipped": skipped}
+
+
+@groups_router.get("/recommendations", response_model=s.Page[s.RecommendationRow])
+def list_recommendations(
+    _: CurrentAdmin,
+    db: DB,
+    status: Literal["all", "pending", "invited", "dismissed", "closed"] = "all",
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=200),
+):
+    """Members vouching for Looking students (read-only here)."""
+    stmt = select(Recommendation)
+    if status != "all":
+        stmt = stmt.where(Recommendation.status == status)
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    offset, limit = _paged(page, page_size)
+    rows = list(db.scalars(stmt.order_by(Recommendation.updated_at.desc()).offset(offset).limit(limit)).unique())
+    names = dict(db.execute(select(Group.id, Group.name).where(Group.id.in_({r.group_id for r in rows if r.group_id}))).all())
+    items = [
+        s.RecommendationRow(id=r.id, group_id=r.group_id, group_name=names.get(r.group_id), recommender_id=r.recommender_id,
+                            recommender_name=r.recommender.name, student_id=r.student_id, student_name=r.student.name,
+                            note=r.note, status=r.status, created_at=r.created_at, updated_at=r.updated_at)
+        for r in rows
+    ]
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
 @groups_router.post("/requests/{request_id}/cancel", status_code=204)

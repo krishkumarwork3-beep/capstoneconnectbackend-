@@ -132,6 +132,17 @@ class JoinRequest(Base):
     receiver: Mapped[User] = relationship(foreign_keys=[receiver_id], lazy="joined")
 
 
+class RateLimit(Base):
+    """A fixed-window counter for sign-in, sign-up and password-reset throttling (app.services.limits).
+    Kept in PostgreSQL so every worker counts together."""
+
+    __tablename__ = "rate_limits"
+
+    key: Mapped[str] = mapped_column(String(120), primary_key=True)
+    count: Mapped[int] = mapped_column(Integer, default=0)
+    window_start: Mapped[datetime] = _now_column()
+
+
 class Recommendation(Base):
     """A group Member vouching for a Looking student. Only the Group Lead sees it."""
 

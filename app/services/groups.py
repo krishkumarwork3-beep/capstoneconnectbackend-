@@ -12,7 +12,7 @@ Seat-changing steps lock the group row (SELECT … FOR UPDATE), so two simultane
 overfill a group.
 """
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, not_found, rule
@@ -41,6 +41,28 @@ def is_lead(group: Group | None, user_id: str) -> bool:
 def lead_group_ids(user: User) -> list[str]:
     membership = user.membership
     return [membership.group_id] if membership and membership.role == "admin" else []
+
+
+def phone_visible_ids(db: Session, viewer: User, user_ids: list[str]) -> set[str]:
+    """Whose full phone number the viewer may see among user_ids: their own, their group's
+    members', and anyone they had a request or invitation accepted with."""
+    visible = {viewer.id}
+    if viewer.membership:
+        visible |= set(db.scalars(select(GroupMember.user_id).where(GroupMember.group_id == viewer.membership.group_id)))
+    others = [uid for uid in user_ids if uid not in visible]
+    if others:
+        rows = db.execute(
+            select(JoinRequest.sender_id, JoinRequest.receiver_id).where(
+                JoinRequest.status == "accepted",
+                or_(
+                    (JoinRequest.sender_id == viewer.id) & JoinRequest.receiver_id.in_(others),
+                    (JoinRequest.receiver_id == viewer.id) & JoinRequest.sender_id.in_(others),
+                ),
+            )
+        )
+        for sender_id, receiver_id in rows:
+            visible.add(receiver_id if sender_id == viewer.id else sender_id)
+    return visible
 
 
 def _seats_taken(group: Group) -> int:
@@ -141,6 +163,11 @@ def update_group(db: Session, group: Group, actor: User, changes: dict) -> Group
         raise rule("lead_only", 403)
     if "max_members" in changes:
         raise AppError("Group size cannot be changed")
+    return apply_group_changes(db, group, changes)
+
+
+def apply_group_changes(db: Session, group: Group, changes: dict) -> Group:
+    """Name, description, domain and requirements (the Group Lead, or an admin)."""
     if changes.get("name") is not None:
         group.name = changes["name"].strip()
         # Requests keep the group's name for their history; keep pending ones in step.
@@ -153,6 +180,23 @@ def update_group(db: Session, group: Group, actor: User, changes: dict) -> Group
     if changes.get("requirements") is not None:
         group.requirements = changes["requirements"]
     return group
+
+
+def transfer_lead(db: Session, group: Group, new_lead_id: str) -> GroupMember:
+    """Makes another member the Group Lead; the old lead stays as a member."""
+    target = next((m for m in group.members if m.user_id == new_lead_id), None)
+    if target is None:
+        raise AppError("That student is not in this group", 409)
+    if target.role == "admin":
+        raise AppError("They are already the Group Lead", 409)
+    for member in group.members:
+        if member.role == "admin":
+            member.role = "member"
+    target.role = "admin"
+    group.created_by = target.user_id
+    # The new lead's and old lead's apps reload their group (and the lead-only pages).
+    chat.conversations_changed(db, (m.user_id for m in group.members))
+    return target
 
 
 def delete_group(db: Session, group: Group, actor: User) -> None:

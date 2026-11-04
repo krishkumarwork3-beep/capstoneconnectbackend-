@@ -217,6 +217,46 @@ class GroupDetail(GroupRow):
     pending_requests: int
 
 
+class GroupEditIn(BaseModel):
+    """Only the fields sent change. Group size is fixed once a group exists."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    description: str | None = Field(default=None, max_length=2000)
+    domain: str | None = Field(default=None, min_length=1, max_length=160)
+    requirements: list[str] | None = Field(default=None, max_length=20)
+
+    @field_validator("requirements")
+    @classmethod
+    def _requirements(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        seen: list[str] = []
+        for item in (v.strip()[:60] for v in value):
+            if item and item.lower() not in (v.lower() for v in seen):
+                seen.append(item)
+        return seen
+
+
+class LeadIn(BaseModel):
+    user_id: str
+
+
+class RecommendationRow(Out):
+    id: str
+    group_id: str | None = None
+    group_name: str | None = None
+    recommender_id: str
+    recommender_name: str
+    student_id: str
+    student_name: str
+    note: str | None = None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
 class RequestRow(Out):
     id: str
     type: str

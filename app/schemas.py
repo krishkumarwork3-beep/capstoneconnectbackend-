@@ -27,7 +27,10 @@ class UserOut(Out):
     college: str
     department: str | None = None
     passing_year: int
+    # The full number only for the student, their group and people they accepted a request with;
+    # otherwise masked (+91 98••• ••210) and phone_visible is false.
     phone: str
+    phone_visible: bool = True
     bio: str
     skills: list[str]
     resume_url: str | None = None

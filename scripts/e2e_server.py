@@ -1,0 +1,93 @@
+"""The API for the end-to-end tests (../3dcapconnectfrontend/e2e), on a brand-new database.
+
+    uv run python scripts/e2e_server.py [--port 8000]
+
+Drops and recreates the `capstoneconnect_e2e` database on the server in DATABASE_URL (.env), runs
+every migration, seeds the demo data, then serves the API with uploads in `.e2e/uploads`. Reset
+codes are returned to the app (ALLOW_DEV_CODE) and demo login is off, as on a real deployment.
+The per-IP limits on sign-in and sign-up are raised, because every test runs from 127.0.0.1;
+the per-number limits stay as configured.
+"""
+
+import argparse
+import os
+import re
+import shutil
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+DB_NAME = "capstoneconnect_e2e"
+
+
+def _base_url() -> str:
+    env = (ROOT / ".env").read_text(encoding="utf-8") if (ROOT / ".env").exists() else ""
+    match = re.search(r"(?m)^DATABASE_URL=(.+)$", env)
+    url = os.environ.get("DATABASE_URL") or (match.group(1).strip() if match else "")
+    if not url:
+        sys.exit("Set DATABASE_URL in .env (uv run python scripts/local_postgres.py writes it)")
+    return url
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=8000)
+    args = parser.parse_args()
+
+    base = _base_url()
+    url = re.sub(r"/[^/?]+(\?|$)", f"/{DB_NAME}\\1", base, count=1)
+
+    import psycopg
+
+    admin_url = base.replace("postgresql+psycopg", "postgresql")
+    with psycopg.connect(admin_url, autocommit=True) as conn:
+        conn.execute(f"DROP DATABASE IF EXISTS {DB_NAME} WITH (FORCE)")
+        conn.execute(f"CREATE DATABASE {DB_NAME}")
+
+    uploads = ROOT / ".e2e" / "uploads"
+    shutil.rmtree(uploads, ignore_errors=True)
+    uploads.mkdir(parents=True)
+
+    os.environ.update({
+        "DATABASE_URL": url,
+        "UPLOAD_DIR": str(uploads),
+        "ALLOW_DEV_CODE": "true",
+        "DEMO_LOGIN": "false",
+        "SMS_PROVIDER": "console",
+        "GITHUB_TOKEN": "",
+        "ADMIN_EMAIL": "",
+        "ADMIN_PASSWORD": "",
+        "LOGIN_LIMIT_PER_IP": "500",
+        "SIGNUP_LIMIT_PER_IP": "500",
+        "RESET_LIMIT_PER_IP": "500",
+        "VERIFY_LIMIT_PER_IP": "500",
+        "CORS_ORIGINS": '["http://localhost:3000","http://127.0.0.1:3000","http://localhost:3100"]',
+        "PUBLIC_BASE_URL": f"http://localhost:{args.port}",
+    })
+
+    from alembic import command
+    from alembic.config import Config
+
+    command.upgrade(Config(str(ROOT / "alembic.ini")), "head")
+
+    from app.db import SessionLocal
+    from app.seed import seed
+    from app.services.admin import create_admin
+
+    with SessionLocal() as db:
+        seed(db)
+        # The admin portal tests sign in with these (local test accounts on a throwaway database).
+        create_admin(db, "e2e-admin@example.test", "E2E Admin", "e2e-admin-password", "admin")
+        create_admin(db, "e2e-viewer@example.test", "E2E Viewer", "e2e-viewer-password", "viewer")
+        db.commit()
+    print(f"E2E database {DB_NAME} ready", flush=True)
+
+    import uvicorn
+
+    uvicorn.run("app.main:app", host="127.0.0.1", port=args.port, log_level="warning")
+
+
+if __name__ == "__main__":
+    main()

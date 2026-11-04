@@ -46,13 +46,14 @@ uv run uvicorn app.main:app --reload --port 8000
 uv run pytest
 ```
 
-64 tests against a real PostgreSQL database named `capstoneconnect_test` (from `TEST_DATABASE_URL`,
+90 tests against a real PostgreSQL database named `capstoneconnect_test` (from `TEST_DATABASE_URL`,
 or `DATABASE_URL` with the database renamed). They never touch the development database. They
 cover sign-up and sessions, the whole password-reset flow, every group/request/recommendation rule,
 search and sorting, profile edits, GitHub verification, upload checks, chat visibility and the
 live socket (messages, receipts, typing, presence, sign-in and origin checks), and the admin API
 (access and read-only admins, lock-out, students, suspensions and blocked numbers enforced on the
-student side, groups, chat moderation, admin accounts, audit log).
+student side, groups, chat moderation, admin accounts, audit log), throttling, phone-number privacy,
+private uploads (including path traversal and renamed executables) and unsafe-settings checks.
 GitHub is mocked in the tests.
 
 ## Frontend
@@ -76,9 +77,50 @@ Restart `npm run dev`. Open the site on the **same host** as the API (`localhost
 3. `POST /api/auth/password/reset {reset_token, password}` — sets the password, signs in, and signs
    out every other session.
 
-Only a keyed hash of each code is stored. `SMS_PROVIDER=console` (default) logs the SMS and returns
-the code as `dev_code` so the flow works without a phone; the frontend shows it. For real SMS set
-`SMS_PROVIDER=twilio` and the three `TWILIO_*` variables (a Twilio number that can send to India).
+Only a keyed hash of each code is stored. `SMS_PROVIDER=console` (default) writes the SMS to the
+server log. The code is also returned to the app as `dev_code` (and shown on the forgot-password
+page) **only** with `ALLOW_DEV_CODE=true`, for local development: otherwise anyone who knows a phone
+number could reset that account. For real SMS set `SMS_PROVIDER=twilio` and the three `TWILIO_*`
+variables (a Twilio number that can send to India).
+
+## Throttling
+
+Sign-in, sign-up and each password-reset step are limited per phone number **and** per IP address;
+over the limit the API answers `429` with "Too many attempts. Try again in N minutes." and a
+`Retry-After` header.
+
+| Step | Per number | Per IP | Window |
+| --- | --- | --- | --- |
+| `POST /auth/login` (wrong passwords) | 5 | 20 | 15 min |
+| `POST /auth/signup` | 5 | 10 | 60 min |
+| `POST /auth/password/forgot` | 5 | 20 | 60 min |
+| `POST /auth/password/verify` and `/reset` | 10 | 30 | 15 min |
+
+A successful sign-in clears the number's count. The counters are rows in the `rate_limits` table,
+updated with one atomic upsert, so every worker shares them (`--workers 2`). Behind a reverse proxy
+run uvicorn with `--proxy-headers` so the visitor's address is used. Every limit is a setting
+(`LOGIN_LIMIT_PER_PHONE` …, see `.env.example`).
+
+## Privacy and uploads
+
+- **Phone numbers:** a student's full number goes only to themselves, their group's members and
+  anyone they had a request or invitation accepted with (`phone_visible: true`). Everyone else gets
+  a masked number (`+91 98••• ••210`, `phone_visible: false`). Admins see every number.
+- **Uploads** (`/uploads/...`, same links as before): avatars are public; résumés need a signed-in
+  student or an admin; chat attachments are served only to the conversation's participants (and
+  admins). A message can only attach a file just uploaded to this server, and a file can't be
+  re-sent to another conversation. Types are checked by content and sizes are capped
+  (avatar 2 MB PNG/JPG, résumé 5 MB PDF, attachment 5 MB PDF/PNG/JPG/DOCX/ZIP).
+
+## Unsafe settings
+
+```bash
+uv run python -m app.check_config          # lists unsafe production settings, exit code 1 if any
+```
+
+With `COOKIE_SECURE=true` (a real HTTPS deployment) the API refuses to start if `SECRET_KEY` is
+the development default, `DEMO_LOGIN=true` or `ALLOW_DEV_CODE=true`, and logs a loud warning for
+`SMS_PROVIDER=console`.
 
 ## GitHub contributions
 
@@ -136,7 +178,9 @@ The admin portal (`../adminportal`, port 3100) runs on `/api/admin` (see its REA
 | Dashboard | `GET /stats` |
 | Students | `GET /users` (q, status, college, sort, page, page_size) `GET /users/colleges` `GET /users/export.csv` `POST /users` `GET/PATCH/DELETE /users/{id}` `POST /users/{id}/password` `POST /users/{id}/ban` `POST /users/{id}/unban` `POST /users/bulk` |
 | Blocked numbers | `GET/POST /banned-phones` `DELETE /banned-phones/{phone}` |
-| Groups and requests | `GET /groups` `GET/DELETE /groups/{id}` `DELETE /groups/{id}/members/{userId}` `GET /requests` `POST /requests/{id}/cancel` |
+| Student files | `DELETE /users/{id}/avatar` `DELETE /users/{id}/resume` (the file is deleted from disk too) |
+| Groups and requests | `GET /groups` `GET/PATCH/DELETE /groups/{id}` `POST /groups/{id}/lead` `DELETE /groups/{id}/members/{userId}` `GET /requests` `POST /requests/{id}/cancel` `GET /recommendations` |
+| Select all and bulk | `GET /users/ids` `GET /groups/ids` `GET /requests/ids` `POST /groups/bulk-delete` `POST /banned-phones/bulk-delete` `POST /requests/bulk-cancel` `POST /messages/bulk-delete` |
 | Chat | `GET /conversations` `GET /conversations/{id}/messages` `DELETE /messages/{id}` |
 | Admins and audit | `GET/POST /admins` `PATCH/DELETE /admins/{id}` `GET /audit` |
 
@@ -164,14 +208,15 @@ All under `/api`. Errors are `{"message": "…"}`; rule errors use the same word
 `users` · `groups` · `group_members` (unique `user_id`: one group per student) · `join_requests`
 (join requests and invitations, with the group's name kept for history) · `recommendations` ·
 `conversations` + `conversation_participants` (per-user unread counts and read/delivered times) · `messages` ·
-`password_reset_codes` · `admin_users` · `banned_phones` · `audit_log`. Migrations in `alembic/versions/`.
+`password_reset_codes` · `admin_users` · `banned_phones` · `audit_log` · `rate_limits`. Migrations in `alembic/versions/`.
 
 Seat-changing operations lock the group row (`SELECT … FOR UPDATE`), so two simultaneous accepts
 can't overfill a group.
 
 ## Production checklist
 
-- A long random `SECRET_KEY`, `COOKIE_SECURE=true` (HTTPS), `DEMO_LOGIN=false`
+- A long random `SECRET_KEY`, `COOKIE_SECURE=true` (HTTPS), `DEMO_LOGIN=false`, `ALLOW_DEV_CODE=false`;
+  `uv run python -m app.check_config` must report nothing
 - A strong `ADMIN_PASSWORD` (or create admins with `app.admin_cli` and leave it empty); the admin
   portal's origin in `CORS_ORIGINS`, on the same site as the API
 - `CORS_ORIGINS` = the site's origin; frontend and API on the same site (e.g. `app.example.com` and

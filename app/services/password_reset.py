@@ -88,7 +88,8 @@ def request_code(db: Session, phone: str) -> dict:
         db.rollback()
         raise AppError("We could not send the SMS. Try again in a minute.", 502) from exc
     db.commit()
-    if settings.sms_provider == "console":
+    # Only for local development (see config.allow_dev_code): the code is otherwise a secret.
+    if settings.allow_dev_code and settings.sms_provider == "console":
         reply["dev_code"] = code
     return reply
 

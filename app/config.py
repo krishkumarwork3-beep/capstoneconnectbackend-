@@ -8,6 +8,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# The SECRET_KEY default: fine on a laptop, never on a public server.
+DEV_SECRET_KEY = "dev-only-change-me-dev-only-change-me"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ROOT / ".env", env_file_encoding="utf-8", extra="ignore")
@@ -16,7 +19,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/capstoneconnect"
 
     # Signs session cookies and password-reset tokens. Must be long and random in production.
-    secret_key: str = Field(default="dev-only-change-me-dev-only-change-me", min_length=32)
+    secret_key: str = Field(default=DEV_SECRET_KEY, min_length=32)
     session_days: int = 14
     # Cookies need Secure over HTTPS (production); local http://localhost needs it off.
     cookie_secure: bool = False
@@ -39,6 +42,10 @@ class Settings(BaseSettings):
     reset_token_minutes: int = 15
     # "console" logs the code (development); "twilio" sends a real SMS.
     sms_provider: str = "console"
+    # Return the reset code in the API answer (dev_code) so the flow works without a phone.
+    # Only with SMS_PROVIDER=console, and never on a public server: anyone who knows a phone
+    # number could reset that account.
+    allow_dev_code: bool = False
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
     twilio_from_number: str = ""
@@ -61,6 +68,21 @@ class Settings(BaseSettings):
     admin_email: str = ""
     admin_password: str = ""
     admin_name: str = "Site admin"
+
+    # Sign-in, sign-up and password-reset throttling, per phone number and per IP address
+    # (counters are in PostgreSQL, so every worker shares them). attempts / minutes.
+    login_limit_per_phone: int = 5
+    login_limit_per_ip: int = 20
+    login_window_minutes: int = 15
+    signup_limit_per_phone: int = 5
+    signup_limit_per_ip: int = 10
+    signup_window_minutes: int = 60
+    reset_limit_per_phone: int = 5
+    reset_limit_per_ip: int = 20
+    reset_window_minutes: int = 60
+    verify_limit_per_phone: int = 10
+    verify_limit_per_ip: int = 30
+    verify_window_minutes: int = 15
 
 
 @lru_cache

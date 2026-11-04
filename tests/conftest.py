@@ -27,6 +27,8 @@ def _test_url() -> str:
 # Settings are read once, so the environment is set before the app is imported.
 os.environ["DATABASE_URL"] = _test_url()
 os.environ["SMS_PROVIDER"] = "console"
+# The reset tests read the code from the answer; test_security checks it is off by default.
+os.environ["ALLOW_DEV_CODE"] = "true"
 os.environ["GITHUB_TOKEN"] = ""
 os.environ["DEMO_LOGIN"] = "true"
 os.environ["UPLOAD_DIR"] = str(ROOT / ".pytest_cache" / "uploads")
@@ -69,7 +71,7 @@ def schema():
 @pytest.fixture(autouse=True)
 def demo_data(schema):
     with SessionLocal() as db:
-        db.execute(text(f"TRUNCATE {TABLES}, admin_users, banned_phones, audit_log CASCADE"))
+        db.execute(text(f"TRUNCATE {TABLES}, admin_users, banned_phones, audit_log, rate_limits CASCADE"))
         db.commit()
         seed(db)
     reset_lockouts()

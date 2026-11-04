@@ -1,6 +1,10 @@
-"""Sign up, log in, log out, who am I, and forgot password (SMS code)."""
+"""Sign up, log in, log out, who am I, and forgot password (SMS code).
 
-from fastapi import APIRouter, BackgroundTasks, Response
+Sign-in, sign-up and every password-reset step are throttled per phone number and per IP
+address (app.services.limits).
+"""
+
+from fastapi import APIRouter, BackgroundTasks, Request, Response
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -11,7 +15,7 @@ from app.errors import AppError
 from app.models import User, utcnow
 from app.security import create_session_token, hash_password, new_id, normalize_phone, verify_password
 from app.serializers import user_out
-from app.services import bans, github, password_reset
+from app.services import bans, github, limits, password_reset
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -31,7 +35,8 @@ def _start_session(response: Response, user: User) -> None:
 
 
 @router.post("/signup", response_model=schemas.UserOut, status_code=201)
-def signup(payload: schemas.SignupIn, response: Response, background: BackgroundTasks, db: DB):
+def signup(payload: schemas.SignupIn, request: Request, response: Response, background: BackgroundTasks, db: DB):
+    limits.hit(db, limits.rule("signup"), payload.phone, limits.client_ip(request))
     phone = normalize_phone(payload.phone)
     if len(phone) < 10:
         raise AppError("Enter a valid phone number", 422)
@@ -68,11 +73,17 @@ def signup(payload: schemas.SignupIn, response: Response, background: Background
 
 
 @router.post("/login", response_model=schemas.UserOut)
-def login(payload: schemas.LoginIn, response: Response, db: DB):
+def login(payload: schemas.LoginIn, request: Request, response: Response, db: DB):
+    """Five wrong passwords for a number (or 20 from one address) in 15 minutes: 429 until the
+    window ends. Signing in clears the number's count."""
+    rule, ip = limits.rule("login"), limits.client_ip(request)
+    limits.check(db, rule, payload.phone, ip)
     user = db.scalar(select(User).where(User.phone_normalized == normalize_phone(payload.phone)))
     if user is None or not verify_password(payload.password, user.password_hash):
+        limits.hit(db, rule, payload.phone, ip)
         raise AppError("Invalid phone number or password", 401)
     bans.ensure_can_sign_in(db, user)
+    limits.reset(db, rule, payload.phone)
     user.last_seen = utcnow()
     db.commit()
     _start_session(response, user)
@@ -108,18 +119,21 @@ def demo_login(user_id: str, response: Response, db: DB, _: OptionalUser):
 
 
 @router.post("/password/forgot", response_model=schemas.ForgotOut)
-def forgot_password(payload: schemas.ForgotIn, db: DB):
+def forgot_password(payload: schemas.ForgotIn, request: Request, db: DB):
+    limits.hit(db, limits.rule("reset"), payload.phone, limits.client_ip(request))
     return password_reset.request_code(db, payload.phone)
 
 
 @router.post("/password/verify", response_model=schemas.VerifyCodeOut)
-def verify_reset_code(payload: schemas.VerifyCodeIn, db: DB):
+def verify_reset_code(payload: schemas.VerifyCodeIn, request: Request, db: DB):
+    limits.hit(db, limits.rule("verify"), payload.phone, limits.client_ip(request))
     return {"reset_token": password_reset.verify_code(db, payload.phone, payload.code)}
 
 
 @router.post("/password/reset", response_model=schemas.UserOut)
-def reset_password(payload: schemas.ResetIn, response: Response, db: DB):
+def reset_password(payload: schemas.ResetIn, request: Request, response: Response, db: DB):
     """Sets the new password and signs in with it (older sessions stop working)."""
+    limits.hit(db, limits.rule("verify"), None, limits.client_ip(request))
     user = password_reset.reset_password(db, payload.reset_token, payload.password)
     _start_session(response, user)
     return user_out(user)

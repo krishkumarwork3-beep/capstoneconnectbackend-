@@ -95,9 +95,9 @@ def test_chat_visibility_unread_and_direct(as_user):
     again = outsider.post("/api/conversations/direct", json={"user_id": "usr_1"}).json()
     assert direct["id"] == again["id"] and direct["title"] == "Aarav Sharma"
     assert outsider.post("/api/conversations/direct", json={"user_id": "usr_8"}).status_code == 400
+    uploaded = outsider.post("/api/uploads/attachments", files={"file": ("cv.pdf", b"%PDF-1.4 cv", "application/pdf")}).json()
     with_file = outsider.post(
-        f"/api/conversations/{direct['id']}/messages",
-        json={"text": "", "attachment": {"name": "cv.pdf", "url": "http://x/cv.pdf", "size": 10}},
+        f"/api/conversations/{direct['id']}/messages", json={"text": "", "attachment": uploaded}
     ).json()
     assert with_file["attachment"]["name"] == "cv.pdf"
     listed = next(c for c in lead.get("/api/conversations").json() if c["id"] == direct["id"])

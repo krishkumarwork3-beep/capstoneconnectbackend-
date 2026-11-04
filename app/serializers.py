@@ -4,7 +4,16 @@ from app import schemas
 from app.models import Conversation, Group, JoinRequest, Message, Recommendation, User
 
 
-def user_out(user: User) -> schemas.UserOut:
+def mask_phone(normalized: str) -> str:
+    """+91 98••• ••210: enough to recognise a number, not to call it."""
+    national, country = normalized[-10:], normalized[:-10]
+    return f"{'+' + country + ' ' if country else ''}{national[:2]}••• ••{national[-3:]}"
+
+
+def user_out(user: User, show_phone: bool = True) -> schemas.UserOut:
+    """`show_phone`: the full number for the student themselves, their group and the people they
+    accepted a request or invitation with (app.services.groups.phone_visible_ids); a masked one
+    for everyone else."""
     membership = user.membership
     return schemas.UserOut(
         id=user.id,
@@ -12,7 +21,8 @@ def user_out(user: User) -> schemas.UserOut:
         college=user.college,
         department=user.department,
         passing_year=user.passing_year,
-        phone=user.phone,
+        phone=user.phone if show_phone else mask_phone(user.phone_normalized),
+        phone_visible=show_phone,
         bio=user.bio or "",
         skills=list(user.skills or []),
         resume_url=user.resume_url,

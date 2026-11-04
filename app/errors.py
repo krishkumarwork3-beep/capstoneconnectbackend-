@@ -20,10 +20,11 @@ RULE_ERRORS = {
 
 
 class AppError(Exception):
-    def __init__(self, message: str, status: int = 400):
+    def __init__(self, message: str, status: int = 400, headers: dict[str, str] | None = None):
         super().__init__(message)
         self.message = message
         self.status = status
+        self.headers = headers
 
 
 def not_found(what: str) -> AppError:
@@ -37,7 +38,7 @@ def rule(key: str, status: int = 409) -> AppError:
 def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def _app_error(_: Request, exc: AppError):
-        return JSONResponse({"message": exc.message}, status_code=exc.status)
+        return JSONResponse({"message": exc.message}, status_code=exc.status, headers=exc.headers)
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_error(_: Request, exc: StarletteHTTPException):

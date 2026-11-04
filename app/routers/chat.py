@@ -1,10 +1,13 @@
 """Conversations and messages."""
 
 from fastapi import APIRouter, File, UploadFile
+from sqlalchemy import select
 
 from app import schemas
 from app.deps import DB, CurrentUser
 from app.serializers import conversation_out, message_out
+from app.errors import AppError
+from app.models import Message
 from app.services import chat, uploads
 
 router = APIRouter(tags=["chat"])
@@ -37,6 +40,14 @@ def messages(conversation_id: str, db: DB, user: CurrentUser):
 def send(conversation_id: str, payload: schemas.SendMessageIn, db: DB, user: CurrentUser):
     conv = chat.get_visible(db, conversation_id, user)
     attachment = payload.attachment.model_dump() if payload.attachment else None
+    if attachment:
+        # Only a file just uploaded here, and not one already shared elsewhere: attachments are
+        # readable by the conversation they were sent in, so a link can't be re-shared to gain access.
+        parsed = uploads.parse_url(attachment["url"])
+        if parsed is None or parsed[0] != "attachment" or uploads.stored_path(*parsed) is None:
+            raise AppError("Upload the file first, then send it", 422)
+        if db.scalar(select(Message.id).where(Message.attachment_url == attachment["url"]).limit(1)):
+            raise AppError("That file was already sent. Upload it again to share it here.", 409)
     message = chat.send_message(db, conv, user, payload.text, attachment, payload.client_id)
     db.commit()
     return message_out(message, payload.client_id)

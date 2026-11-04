@@ -1,7 +1,12 @@
-"""Stores uploaded files on disk (UPLOAD_DIR) and serves them under /uploads.
+"""Stores uploaded files on disk (UPLOAD_DIR); app.routers.files serves them under /uploads.
 
 Types are checked by content (the file's first bytes), not only by name, and sizes are capped.
+Avatars are public; résumés need a sign-in, and chat attachments are only for the conversation's
+participants (and admins).
 """
+
+import re
+from pathlib import Path
 
 from fastapi import UploadFile
 
@@ -24,6 +29,41 @@ RULES = {
     "resume": ({"pdf"}, 5 * MB, "a PDF", "up to 5 MB"),
     "attachment": ({"png", "jpg", "pdf", "zip"}, 5 * MB, "a PDF, PNG, JPG, DOCX or ZIP", "up to 5 MB"),
 }
+
+
+# The only names files are stored under (new_id + extension): anything else is not one of ours.
+STORED_NAME = re.compile(r"^[a-z]{3}_[0-9a-f]{16}\.(png|jpg|pdf|zip|docx)$")
+PURPOSES = ("avatar", "resume", "attachment")
+
+
+def stored_path(purpose: str, name: str) -> Path | None:
+    """The file on disk for /uploads/{purpose}/{name}, or None if that is not a stored file's name
+    (which also rules out path traversal)."""
+    if purpose not in PURPOSES or not STORED_NAME.match(name):
+        return None
+    path = get_settings().upload_dir / purpose / name
+    return path if path.is_file() else None
+
+
+def parse_url(url: str | None) -> tuple[str, str] | None:
+    """(purpose, name) of one of this server's upload URLs, else None."""
+    prefix = f"{get_settings().public_base_url}/uploads/"
+    if not url or not url.startswith(prefix):
+        return None
+    parts = url[len(prefix):].split("/")
+    if len(parts) != 2 or parts[0] not in PURPOSES or not STORED_NAME.match(parts[1]):
+        return None
+    return parts[0], parts[1]
+
+
+def remove(url: str | None) -> bool:
+    """Deletes the stored file behind one of our URLs. True if a file was deleted."""
+    parsed = parse_url(url)
+    path = stored_path(*parsed) if parsed else None
+    if path is None:
+        return False
+    path.unlink(missing_ok=True)
+    return True
 
 
 def _kind_of(head: bytes) -> str | None:

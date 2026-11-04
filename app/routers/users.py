@@ -31,7 +31,7 @@ def _get_user(db: Session, user_id: str) -> User:
 @router.get("", response_model=schemas.UserPage)
 def list_users(
     db: DB,
-    _: CurrentUser,
+    me: CurrentUser,
     search: str | None = None,
     college: str | None = None,
     passing_year: int | None = None,
@@ -76,8 +76,9 @@ def list_users(
     start = int(cursor) if cursor and cursor.isdigit() else 0
     items = db.scalars(stmt.offset(start).limit(limit)).unique().all()
     next_index = start + limit
+    visible = groups.phone_visible_ids(db, me, [u.id for u in items])
     return {
-        "items": [user_out(u) for u in items],
+        "items": [user_out(u, u.id in visible) for u in items],
         "nextCursor": str(next_index) if next_index < total else None,
         "hasMore": next_index < total,
         "total": total,
@@ -85,8 +86,9 @@ def list_users(
 
 
 @router.get("/{user_id}", response_model=schemas.UserOut)
-def get_user(user_id: str, db: DB, _: CurrentUser):
-    return user_out(_get_user(db, user_id))
+def get_user(user_id: str, db: DB, me: CurrentUser):
+    user = _get_user(db, user_id)
+    return user_out(user, user.id in groups.phone_visible_ids(db, me, [user.id]))
 
 
 @router.patch("/{user_id}", response_model=schemas.UserOut)

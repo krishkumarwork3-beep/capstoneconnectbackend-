@@ -16,3 +16,6 @@ wheels/
 .pgdata-test/
 uploads/*
 !uploads/.gitkeep
+
+# End-to-end test data (scripts/e2e_server.py)
+.e2e/
