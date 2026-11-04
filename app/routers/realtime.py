@@ -209,34 +209,44 @@ def _heartbeat(token: str | None, user_id: str) -> bool:
     return True
 
 
-def _receipt(user_id: str, conversation_id: str, kind: str) -> None:
+def _receipt(user_id: str, conversation_id: str, kind: str) -> bool:
+    """Marks the conversation read/delivered for this user. False (nothing done) unless they are a
+    participant right now, checked in the database on every frame."""
     with SessionLocal() as db:
         user = db.get(User, user_id)
         if user is None:
-            return
+            return False
         try:
             conv = chat.get_visible(db, conversation_id, user)
         except AppError:
-            return
+            return False
         if kind == "read":
             chat.mark_read(db, conv, user)
         else:
             chat.mark_delivered(db, conv, user.id)
         db.commit()
+        return True
 
 
-def _typing(user_id: str, name: str, conversation_id: str, typing: bool) -> None:
+def _typing(user_id: str, conversation_id: str, typing: bool, send: bool = True) -> bool:
+    """Tells the other participants. False (nothing sent) unless this user is a participant right
+    now; the name shown is the one in the database now, not one remembered from the handshake."""
     with SessionLocal() as db:
         conv = db.get(Conversation, conversation_id)
-        if conv is None:
-            return
+        user = db.get(User, user_id)
+        if conv is None or user is None:
+            return False
         people = [p.user_id for p in conv.participants]
+        name = user.name
     if user_id not in people:
-        return
+        return False
+    if not send:
+        return True  # allowed, but the others already know this state
     realtime.publish_now(
         (p for p in people if p != user_id),
         {"type": "typing", "conversation_id": conversation_id, "user_id": user_id, "name": name, "typing": typing},
     )
+    return True
 
 
 def _origin_allowed(ws: WebSocket) -> bool:
@@ -285,16 +295,26 @@ async def _handle(ws: WebSocket, conn: "realtime.Connection", frame: "Frame", st
                 return True
         return False
     if kind in ("read", "delivered"):
-        await run_in_threadpool(_receipt, state.user_id, conversation_id, kind)
+        if not await run_in_threadpool(_receipt, state.user_id, conversation_id, kind):
+            _forbidden(conn, kind)
     elif kind == "typing":
         typing = bool(frame.typing)
         previous = state.typing_sent.get(conversation_id)
         now = time.monotonic()
-        if previous and previous[0] == typing and now - previous[1] < TYPING_REPEAT_SECONDS:
+        # The same state again within a moment isn't passed on, but it is still authorized.
+        repeat = bool(previous and previous[0] == typing and now - previous[1] < TYPING_REPEAT_SECONDS)
+        if not await run_in_threadpool(_typing, state.user_id, conversation_id, typing, not repeat):
+            state.typing_sent.pop(conversation_id, None)
+            _forbidden(conn, kind)
             return False
-        state.typing_sent[conversation_id] = (typing, now)
-        await run_in_threadpool(_typing, state.user_id, state.name, conversation_id, typing)
+        if not repeat:
+            state.typing_sent[conversation_id] = (typing, now)
     return False
+
+
+def _forbidden(conn: "realtime.Connection", kind: str) -> None:
+    """Not a participant (or no such conversation: the same answer, so ids can't be probed)."""
+    conn.push({"type": "error", "for": kind, "code": "forbidden"})
 
 
 @router.websocket("/ws")
@@ -374,5 +394,5 @@ async def socket(ws: WebSocket):
             # Whoever they were typing to should not see "typing…" linger.
             for conversation_id, (typing, _) in state.typing_sent.items():
                 if typing:
-                    await run_in_threadpool(_typing, user_id, name, conversation_id, False)
+                    await run_in_threadpool(_typing, user_id, conversation_id, False)
             await run_in_threadpool(_presence, user_id, False)
