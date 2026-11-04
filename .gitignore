@@ -22,3 +22,6 @@ uploads/*
 
 # Database dumps (scripts/db_backup.py)
 backups/
+
+# Load-test output
+loadtest/results*

@@ -68,11 +68,20 @@ class Server:
         raise AssertionError("server did not start")
 
     def stop(self) -> None:
-        self.proc.terminate()
+        # The whole tree: on Windows, stopping uvicorn's parent leaves its worker processes running.
+        import psutil
+
         try:
-            self.proc.wait(timeout=20)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
+            parent = psutil.Process(self.proc.pid)
+            family = parent.children(recursive=True) + [parent]
+        except psutil.NoSuchProcess:
+            family = []
+        for proc in family:
+            try:
+                proc.kill()
+            except psutil.NoSuchProcess:
+                pass
+        psutil.wait_procs(family, timeout=20)
 
 
 def _login(url: str, phone: str, password: str, forwarded_for: str | None = None) -> int:
