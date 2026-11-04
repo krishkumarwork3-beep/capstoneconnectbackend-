@@ -29,6 +29,7 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import dataclass, field
 
 from typing import Literal
 
@@ -60,13 +61,58 @@ IDLE_SECONDS = 90
 MAX_SOCKETS_PER_USER = 10
 
 
+ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
+# A frame is a flat object: anything nested deeper than this is refused before it is parsed
+# (Python's parser would otherwise recurse ~1000 levels deep on a 2 KB frame).
+MAX_DEPTH = 4
+
+
+def _too_deep(raw: str) -> bool:
+    depth, in_string, escaped = 0, False, False
+    for ch in raw:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "[{":
+            depth += 1
+            if depth > MAX_DEPTH:
+                return True
+        elif ch in "]}":
+            depth -= 1
+    return False
+
+
+def parse_frame(raw: str) -> "Frame":
+    """The frame, or ValueError for anything that isn't exactly one of the schemas below."""
+    if _too_deep(raw):
+        raise ValueError("nested too deeply")
+    return Frame.model_validate(json.loads(raw))
+
+
+# Every frame type a client may send: who may send it and what it is authorized against, checked
+# from the database on every frame. tests/attacks/test_ws_messages.py fails on a type missing here.
+FRAME_POLICY: dict[str, dict] = {
+    "ping": {"roles": {"student"}, "object": None, "writes": None},
+    "typing": {"roles": {"student"}, "object": "conversation: a participant", "writes": None},
+    "read": {"roles": {"student"}, "object": "conversation: a participant", "writes": "own read receipt"},
+    "delivered": {"roles": {"student"}, "object": "conversation: a participant", "writes": "own delivery receipt"},
+}
+
+
 class Frame(BaseModel):
     """The only frames a client may send. Anything else closes the socket (1008)."""
 
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["ping", "typing", "delivered", "read"]
-    conversation_id: str | None = Field(default=None, min_length=1, max_length=64)
+    # An id, nothing else: no NUL bytes, spaces or operators can reach a query.
+    conversation_id: str | None = Field(default=None, min_length=1, max_length=64, pattern=ID_PATTERN)
     typing: StrictBool | None = None
 # How often a held connection re-checks its session and refreshes "last seen".
 HEARTBEAT_SECONDS = 20
@@ -160,6 +206,54 @@ def _origin_allowed(ws: WebSocket) -> bool:
     return origin is None or origin.rstrip("/") in allowed_origins()
 
 
+@dataclass
+class _State:
+    """What one connection remembers between frames (never who may see what: that is re-read
+    from the database on every frame)."""
+
+    token: str | None
+    user_id: str
+    name: str
+    last_heartbeat: float = field(default_factory=time.monotonic)
+    typing_sent: dict[str, tuple[bool, float]] = field(default_factory=dict)
+    bad_frames: int = 0
+
+
+async def _bad_frame(ws: WebSocket, state: _State) -> bool:
+    """Counts a frame that was ignored; True once there have been too many (socket closed)."""
+    state.bad_frames += 1
+    if state.bad_frames >= MAX_BAD_FRAMES:
+        await ws.close(code=1008, reason="Unknown messages")
+        return True
+    return False
+
+
+async def _handle(ws: WebSocket, conn: "realtime.Connection", frame: "Frame", state: _State) -> bool:
+    """Acts on one valid frame. True when the socket was closed."""
+    kind, conversation_id = frame.type, frame.conversation_id
+    if kind == "ping":
+        conn.push({"type": "pong"})
+        if time.monotonic() - state.last_heartbeat >= HEARTBEAT_SECONDS:
+            state.last_heartbeat = time.monotonic()
+            if not await run_in_threadpool(_heartbeat, state.token, state.user_id):
+                await ws.close(code=4401, reason="Your session ended")
+                return True
+        return False
+    if conversation_id is None:
+        return await _bad_frame(ws, state)
+    if kind in ("read", "delivered"):
+        await run_in_threadpool(_receipt, state.user_id, conversation_id, kind)
+    elif kind == "typing":
+        typing = bool(frame.typing)
+        previous = state.typing_sent.get(conversation_id)
+        now = time.monotonic()
+        if previous and previous[0] == typing and now - previous[1] < TYPING_REPEAT_SECONDS:
+            return False
+        state.typing_sent[conversation_id] = (typing, now)
+        await run_in_threadpool(_typing, state.user_id, state.name, conversation_id, typing)
+    return False
+
+
 @router.websocket("/ws")
 async def socket(ws: WebSocket):
     if not _origin_allowed(ws):
@@ -184,10 +278,8 @@ async def socket(ws: WebSocket):
     if first:
         await run_in_threadpool(_presence, user_id, True)
 
-    last_heartbeat = time.monotonic()
-    typing_sent: dict[str, tuple[bool, float]] = {}
+    state = _State(token=token, user_id=user_id, name=name)
     recent: list[float] = []
-    bad_frames = 0
     try:
         while True:
             try:
@@ -211,36 +303,19 @@ async def socket(ws: WebSocket):
                 await ws.close(code=1009, reason="Message too big")
                 break
             try:
-                frame = Frame.model_validate(json.loads(raw))
-            except (ValueError, ValidationError):
-                bad_frames += 1
-                if bad_frames >= MAX_BAD_FRAMES:
-                    await ws.close(code=1008, reason="Unknown messages")
+                frame = parse_frame(raw)
+            except (ValueError, ValidationError, RecursionError):
+                if await _bad_frame(ws, state):
                     break
                 continue
-            kind, conversation_id = frame.type, frame.conversation_id
-            if kind == "ping":
-                conn.push({"type": "pong"})
-                if time.monotonic() - last_heartbeat >= HEARTBEAT_SECONDS:
-                    last_heartbeat = time.monotonic()
-                    if not await run_in_threadpool(_heartbeat, token, user_id):
-                        await ws.close(code=4401, reason="Your session ended")
-                        break
-            elif conversation_id is None:
-                bad_frames += 1
-                if bad_frames >= MAX_BAD_FRAMES:
-                    await ws.close(code=1008, reason="Unknown messages")
+            try:
+                if await _handle(ws, conn, frame, state):
                     break
-            elif kind in ("read", "delivered"):
-                await run_in_threadpool(_receipt, user_id, conversation_id, kind)
-            elif kind == "typing":
-                typing = bool(frame.typing)
-                previous = typing_sent.get(conversation_id)
-                now = time.monotonic()
-                if previous and previous[0] == typing and now - previous[1] < TYPING_REPEAT_SECONDS:
-                    continue
-                typing_sent[conversation_id] = (typing, now)
-                await run_in_threadpool(_typing, user_id, name, conversation_id, typing)
+            except Exception:
+                # One frame's failure never takes the connection down: the cause is logged here,
+                # the client only learns that this frame did nothing.
+                log.warning("a %s frame from %s failed", frame.type, user_id, exc_info=True)
+                conn.push({"type": "error", "for": frame.type, "code": "failed"})
     except WebSocketDisconnect:
         pass
     except RuntimeError:
@@ -254,7 +329,7 @@ async def socket(ws: WebSocket):
         pump.cancel()
         if realtime.hub.remove(conn):
             # Whoever they were typing to should not see "typing…" linger.
-            for conversation_id, (typing, _) in typing_sent.items():
+            for conversation_id, (typing, _) in state.typing_sent.items():
                 if typing:
                     await run_in_threadpool(_typing, user_id, name, conversation_id, False)
             await run_in_threadpool(_presence, user_id, False)
