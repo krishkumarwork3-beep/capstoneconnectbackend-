@@ -19,3 +19,6 @@ uploads/*
 
 # End-to-end test data (scripts/e2e_server.py)
 .e2e/
+
+# Database dumps (scripts/db_backup.py)
+backups/
