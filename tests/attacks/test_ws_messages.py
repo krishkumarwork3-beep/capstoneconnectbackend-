@@ -114,7 +114,8 @@ def test_an_admin_session_is_not_a_socket_session(admin_client):
 
 
 def test_every_frame_type_is_classified():
-    accepted = set(typing.get_args(ws_routes.Frame.model_fields["type"].annotation))
+    accepted = {typing.get_args(m.model_fields["type"].annotation)[0] for m in ws_routes.FRAME_MODELS.values()}
+    assert accepted == set(ws_routes.FRAME_MODELS)
     assert accepted == set(ws_routes.FRAME_POLICY), f"classify these in FRAME_POLICY: {accepted ^ set(ws_routes.FRAME_POLICY)}"
     for kind, policy in ws_routes.FRAME_POLICY.items():
         assert policy["roles"] and policy["roles"] <= {"student"}, kind

@@ -31,10 +31,10 @@ import logging
 import time
 from dataclasses import dataclass, field
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.websockets import WebSocketState
 
@@ -88,11 +88,61 @@ def _too_deep(raw: str) -> bool:
     return False
 
 
-def parse_frame(raw: str) -> "Frame":
-    """The frame, or ValueError for anything that isn't exactly one of the schemas below."""
+def _no_duplicates(pairs: list[tuple[str, object]]) -> dict:
+    """Same rule as HTTP bodies: a key given twice means different things to different parsers."""
+    keys = [k for k, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate key")
+    return dict(pairs)
+
+
+def _no_constants(name: str) -> float:
+    raise ValueError(f"{name} is not JSON")
+
+
+# --- The frames a client may send: one strict schema each (unknown fields refused, exact JSON
+# types, every field required, ids that can only be ids). Nothing else reaches a handler. ------
+
+_STRICT = ConfigDict(extra="forbid", strict=True)
+ConversationId = Annotated[str, Field(min_length=1, max_length=64, pattern=ID_PATTERN)]
+
+
+class PingFrame(BaseModel):
+    model_config = _STRICT
+    type: Literal["ping"]
+
+
+class TypingFrame(BaseModel):
+    model_config = _STRICT
+    type: Literal["typing"]
+    conversation_id: ConversationId
+    typing: bool
+
+
+class ReadFrame(BaseModel):
+    model_config = _STRICT
+    type: Literal["read"]
+    conversation_id: ConversationId
+
+
+class DeliveredFrame(BaseModel):
+    model_config = _STRICT
+    type: Literal["delivered"]
+    conversation_id: ConversationId
+
+
+FRAME_MODELS: dict[str, type[BaseModel]] = {"ping": PingFrame, "typing": TypingFrame, "read": ReadFrame, "delivered": DeliveredFrame}
+Frame = PingFrame | TypingFrame | ReadFrame | DeliveredFrame
+
+
+def parse_frame(raw: str) -> Frame:
+    """The frame, or ValueError for anything that isn't exactly one of FRAME_MODELS."""
     if _too_deep(raw):
         raise ValueError("nested too deeply")
-    return Frame.model_validate(json.loads(raw))
+    data = json.loads(raw, object_pairs_hook=_no_duplicates, parse_constant=_no_constants)
+    if not isinstance(data, dict) or not isinstance(data.get("type"), str) or data["type"] not in FRAME_MODELS:
+        raise ValueError("not a known frame")
+    return FRAME_MODELS[data["type"]].model_validate(data)
 
 
 # Every frame type a client may send: who may send it and what it is authorized against, checked
@@ -105,15 +155,6 @@ FRAME_POLICY: dict[str, dict] = {
 }
 
 
-class Frame(BaseModel):
-    """The only frames a client may send. Anything else closes the socket (1008)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    type: Literal["ping", "typing", "delivered", "read"]
-    # An id, nothing else: no NUL bytes, spaces or operators can reach a query.
-    conversation_id: str | None = Field(default=None, min_length=1, max_length=64, pattern=ID_PATTERN)
-    typing: StrictBool | None = None
 # How often a held connection re-checks its session and refreshes "last seen".
 HEARTBEAT_SECONDS = 20
 # A typing state is passed on at most this often per conversation (unless it changes).
@@ -219,8 +260,11 @@ class _State:
     bad_frames: int = 0
 
 
-async def _bad_frame(ws: WebSocket, state: _State) -> bool:
-    """Counts a frame that was ignored; True once there have been too many (socket closed)."""
+async def _bad_frame(ws: WebSocket, state: _State, conn: "realtime.Connection | None" = None) -> bool:
+    """Refuses a frame that matches no schema (an error frame back, nothing else happens); True
+    once there have been too many (socket closed)."""
+    if conn is not None:
+        conn.push({"type": "error", "for": "frame", "code": "invalid"})
     state.bad_frames += 1
     if state.bad_frames >= MAX_BAD_FRAMES:
         await ws.close(code=1008, reason="Unknown messages")
@@ -230,7 +274,8 @@ async def _bad_frame(ws: WebSocket, state: _State) -> bool:
 
 async def _handle(ws: WebSocket, conn: "realtime.Connection", frame: "Frame", state: _State) -> bool:
     """Acts on one valid frame. True when the socket was closed."""
-    kind, conversation_id = frame.type, frame.conversation_id
+    kind = frame.type
+    conversation_id = getattr(frame, "conversation_id", None)
     if kind == "ping":
         conn.push({"type": "pong"})
         if time.monotonic() - state.last_heartbeat >= HEARTBEAT_SECONDS:
@@ -239,8 +284,6 @@ async def _handle(ws: WebSocket, conn: "realtime.Connection", frame: "Frame", st
                 await ws.close(code=4401, reason="Your session ended")
                 return True
         return False
-    if conversation_id is None:
-        return await _bad_frame(ws, state)
     if kind in ("read", "delivered"):
         await run_in_threadpool(_receipt, state.user_id, conversation_id, kind)
     elif kind == "typing":
@@ -305,7 +348,7 @@ async def socket(ws: WebSocket):
             try:
                 frame = parse_frame(raw)
             except (ValueError, ValidationError, RecursionError):
-                if await _bad_frame(ws, state):
+                if await _bad_frame(ws, state, conn):
                     break
                 continue
             try:

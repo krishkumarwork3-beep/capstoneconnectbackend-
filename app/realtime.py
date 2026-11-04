@@ -16,6 +16,7 @@ from collections.abc import Iterable
 from datetime import datetime
 
 import psycopg
+import psycopg.sql
 from fastapi import WebSocket
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
@@ -167,7 +168,7 @@ class Listener(threading.Thread):
         while not self.stopping.is_set():
             try:
                 with psycopg.connect(_listen_dsn(), autocommit=True) as conn:
-                    conn.execute(f"LISTEN {CHANNEL}")
+                    conn.execute(psycopg.sql.SQL("LISTEN {}").format(psycopg.sql.Identifier(CHANNEL)))
                     self.ready.set()
                     delay = 1.0
                     while not self.stopping.is_set():

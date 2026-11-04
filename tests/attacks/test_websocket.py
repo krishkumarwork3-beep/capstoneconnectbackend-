@@ -44,7 +44,9 @@ def test_malformed_frames_are_ignored_then_close_the_socket(as_user, frame):
         _hello(ws)
         ws.send_text(frame)
         ws.send_json({"type": "ping"})
-        assert ws.receive_json()["type"] == "pong"  # one bad frame: ignored
+        # One bad frame: refused with an error frame, and the socket keeps working.
+        assert ws.receive_json() == {"type": "error", "for": "frame", "code": "invalid"}
+        assert ws.receive_json()["type"] == "pong"
         for _ in range(ws_routes.MAX_BAD_FRAMES):
             ws.send_text(frame)
         assert _closed_with(ws) == 1008
