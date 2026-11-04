@@ -19,6 +19,7 @@ from app import realtime
 from app.config import get_settings
 from app.db import SessionLocal
 from app.errors import AppError
+from app.passwords import ensure_good_password
 from app.models import (
     AdminUser,
     AuditLog,
@@ -79,6 +80,7 @@ def create_admin(db: Session, email: str, name: str, password: str, role: str = 
     email = email.strip().lower()
     if db.scalar(select(AdminUser.id).where(AdminUser.email == email)):
         raise AppError("An admin with this email already exists", 409)
+    ensure_good_password(password)
     admin = AdminUser(id=new_id("adm"), email=email, name=name.strip(), password_hash=hash_password(password), role=role)
     db.add(admin)
     try:

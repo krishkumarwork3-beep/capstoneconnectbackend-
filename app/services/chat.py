@@ -5,6 +5,7 @@ live to the participants' open sockets (see `app.realtime`) when the transaction
 """
 
 from collections.abc import Iterable
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -89,8 +90,16 @@ def get_or_create_direct(db: Session, me: User, other_id: str) -> Conversation:
     return conv
 
 
-def list_messages(db: Session, conv: Conversation) -> list[Message]:
-    return list(db.scalars(select(Message).where(Message.conversation_id == conv.id).order_by(Message.created_at)))
+MESSAGE_PAGE = 500
+
+
+def list_messages(db: Session, conv: Conversation, before: datetime | None = None) -> list[Message]:
+    """The latest MESSAGE_PAGE messages (before `before`, for older history), oldest first."""
+    stmt = select(Message).where(Message.conversation_id == conv.id)
+    if before is not None:
+        stmt = stmt.where(Message.created_at < before)
+    latest = db.scalars(stmt.order_by(Message.created_at.desc()).limit(MESSAGE_PAGE))
+    return list(reversed(list(latest)))
 
 
 def send_message(

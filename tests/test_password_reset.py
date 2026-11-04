@@ -1,6 +1,6 @@
 from datetime import timedelta
 
-from sqlalchemy import update
+from sqlalchemy import text, update
 
 from app.db import SessionLocal
 from app.models import PasswordResetCode, utcnow
@@ -47,10 +47,10 @@ def test_codes_are_throttled(client):
 def test_wrong_codes_run_out(client):
     code = ask_code(client)["dev_code"]
     wrong = "000000" if code != "000000" else "111111"
-    for left in (4, 3, 2, 1):
+    for _ in range(5):
         message = client.post("/api/auth/password/verify", json={"phone": PHONE, "code": wrong}).json()["message"]
-        assert f"{left} tr" in message
-    client.post("/api/auth/password/verify", json={"phone": PHONE, "code": wrong})
+        # One answer for every failure (no "tries left" that would only exist for real accounts).
+        assert message == "That code is not right or has expired. Check it, or ask for a new one."
     # Even the right code is refused once the tries are used up.
     assert client.post("/api/auth/password/verify", json={"phone": PHONE, "code": code}).status_code in (400, 429)
 
@@ -59,6 +59,7 @@ def test_expired_and_replaced_codes(client):
     first = ask_code(client)["dev_code"]
     with SessionLocal() as db:
         db.execute(update(PasswordResetCode).values(created_at=utcnow() - timedelta(minutes=2)))
+        db.execute(text("DELETE FROM rate_limits"))  # the minute between codes has passed
         db.commit()
     second = ask_code(client)["dev_code"]
     if first != second:
@@ -67,3 +68,17 @@ def test_expired_and_replaced_codes(client):
         db.execute(update(PasswordResetCode).values(expires_at=utcnow() - timedelta(seconds=1)))
         db.commit()
     assert client.post("/api/auth/password/verify", json={"phone": PHONE, "code": second}).status_code == 400
+
+
+def test_answers_do_not_reveal_which_numbers_have_accounts(client):
+    unknown = "+91 90000 00000"
+    # The one-a-minute limit applies to every number, registered or not.
+    for phone in (PHONE, unknown):
+        assert client.post("/api/auth/password/forgot", json={"phone": phone}).status_code == 200
+        again = client.post("/api/auth/password/forgot", json={"phone": phone})
+        assert again.status_code == 429 and "Wait before asking for another code" in again.json()["message"]
+    # A wrong code for a real account and any code for an unknown number get the same answer.
+    known = client.post("/api/auth/password/verify", json={"phone": PHONE, "code": "000001"})
+    other = client.post("/api/auth/password/verify", json={"phone": unknown, "code": "000001"})
+    assert known.status_code == other.status_code == 400
+    assert known.json() == other.json()

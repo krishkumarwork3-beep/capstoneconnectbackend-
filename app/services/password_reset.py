@@ -17,7 +17,8 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.errors import AppError
 from app.models import PasswordResetCode, User
-from app.services import bans
+from app.passwords import ensure_good_password
+from app.services import bans, limits
 from app.security import (
     create_reset_token,
     e164,
@@ -49,6 +50,14 @@ def _latest_code(db: Session, user_id: str) -> PasswordResetCode | None:
 
 def request_code(db: Session, phone: str) -> dict:
     settings = get_settings()
+    # One code a minute per number, counted for every number, registered or not, so the "wait"
+    # answer does not reveal which numbers have an account.
+    if settings.otp_resend_seconds > 0:
+        resend = limits.Rule("resend", per_phone=1, per_ip=10**9, window=timedelta(seconds=settings.otp_resend_seconds))
+        try:
+            limits.hit(db, resend, phone, "-")
+        except AppError as exc:
+            raise AppError(exc.message.replace("Too many attempts. Try", "Wait before asking for another code. Try"), 429, exc.headers) from exc
     user = _user_by_phone(db, phone)
     reply = {"message": GENERIC, "resend_after": settings.otp_resend_seconds, "dev_code": None}
     # Same answer for a blocked number or suspended account: no code is sent.
@@ -56,10 +65,6 @@ def request_code(db: Session, phone: str) -> dict:
         return reply
 
     now = datetime.now(UTC)
-    latest = _latest_code(db, user.id)
-    if latest and (now - latest.created_at).total_seconds() < settings.otp_resend_seconds:
-        wait = settings.otp_resend_seconds - int((now - latest.created_at).total_seconds())
-        raise AppError(f"Wait {wait} seconds before asking for another code", 429)
 
     # A new code replaces any earlier one.
     db.execute(
@@ -94,25 +99,29 @@ def request_code(db: Session, phone: str) -> dict:
     return reply
 
 
+# One answer for every failure (wrong, expired, used up, or no account on that number), so trying
+# codes does not reveal which numbers are registered.
+WRONG_CODE = "That code is not right or has expired. Check it, or ask for a new one."
+
+
 def verify_code(db: Session, phone: str, code: str) -> str:
     settings = get_settings()
     user = _user_by_phone(db, phone)
     record = _latest_code(db, user.id) if user else None
     now = datetime.now(UTC)
     if user is None or record is None or record.used_at is not None or record.expires_at <= now:
-        raise AppError("That code has expired or was replaced. Ask for a new one.", 400)
+        raise AppError(WRONG_CODE, 400)
 
     record.attempts += 1
     if record.attempts > settings.otp_max_attempts:
         record.used_at = now
         db.commit()
-        raise AppError("Too many wrong codes. Ask for a new one.", 429)
+        raise AppError(WRONG_CODE, 400)
     if not secrets.compare_digest(record.code_hash, hash_code(code.strip())):
-        left = settings.otp_max_attempts - record.attempts
+        if record.attempts >= settings.otp_max_attempts:
+            record.used_at = now  # used up
         db.commit()
-        if left <= 0:
-            raise AppError("That code is not right, and it is now used up. Ask for a new one.", 400)
-        raise AppError(f"That code is not right. {left} {'try' if left == 1 else 'tries'} left.", 400)
+        raise AppError(WRONG_CODE, 400)
 
     record.used_at = now
     db.commit()
@@ -126,6 +135,7 @@ def reset_password(db: Session, token: str, password: str) -> User:
     if not read or user is None or not token_matches_password(read[1], user.password_hash):
         raise AppError("This reset link has expired. Start again.", 400)
     bans.ensure_can_sign_in(db, user)
+    ensure_good_password(password, user.phone)
     user.password_hash = hash_password(password)
     db.commit()
     return user

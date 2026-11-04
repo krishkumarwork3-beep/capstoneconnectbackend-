@@ -13,7 +13,12 @@ from app.config import get_settings
 from app.deps import DB, CurrentUser, OptionalUser
 from app.errors import AppError
 from app.models import User, utcnow
+from app.passwords import ensure_good_password
 from app.security import create_session_token, hash_password, new_id, normalize_phone, verify_password
+
+# Checked against when the number has no account, so a wrong number takes as long as a wrong
+# password and timing does not tell which numbers are registered.
+_DUMMY_HASH = hash_password("not-a-real-password-for-timing")
 from app.serializers import user_out
 from app.services import bans, github, limits, password_reset
 
@@ -40,6 +45,7 @@ def signup(payload: schemas.SignupIn, request: Request, response: Response, back
     phone = normalize_phone(payload.phone)
     if len(phone) < 10:
         raise AppError("Enter a valid phone number", 422)
+    ensure_good_password(payload.password, payload.phone)
     bans.ensure_number_allowed(db, phone)
     if db.scalar(select(User.id).where(User.phone_normalized == phone)):
         raise AppError("An account already exists for this phone number", 409)
@@ -79,7 +85,8 @@ def login(payload: schemas.LoginIn, request: Request, response: Response, db: DB
     rule, ip = limits.rule("login"), limits.client_ip(request)
     limits.check(db, rule, payload.phone, ip)
     user = db.scalar(select(User).where(User.phone_normalized == normalize_phone(payload.phone)))
-    if user is None or not verify_password(payload.password, user.password_hash):
+    password_ok = verify_password(payload.password, user.password_hash if user else _DUMMY_HASH)
+    if user is None or not password_ok:
         limits.hit(db, rule, payload.phone, ip)
         raise AppError("Invalid phone number or password", 401)
     bans.ensure_can_sign_in(db, user)

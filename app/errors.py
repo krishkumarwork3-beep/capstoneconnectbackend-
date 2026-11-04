@@ -7,6 +7,7 @@ appears whichever backend is in use.
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import IntegrityError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 RULE_ERRORS = {
@@ -44,6 +45,12 @@ def install_error_handlers(app: FastAPI) -> None:
     async def _http_error(_: Request, exc: StarletteHTTPException):
         message = exc.detail if isinstance(exc.detail, str) else "Request failed"
         return JSONResponse({"message": message}, status_code=exc.status_code)
+
+    @app.exception_handler(IntegrityError)
+    async def _conflict(_: Request, exc: IntegrityError):
+        # Two requests changed the same thing at once (a student joining two groups, a phone
+        # number taken in between): the database refused one of them.
+        return JSONResponse({"message": "That changed while you were working on it. Refresh and try again."}, status_code=409)
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(_: Request, exc: RequestValidationError):

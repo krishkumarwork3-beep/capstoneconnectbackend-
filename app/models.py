@@ -36,6 +36,11 @@ def _now_column(**kwargs) -> Mapped[datetime]:
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (
+        Index("ix_users_created_at", "created_at"),
+        Index("ix_users_college", "college"),
+        Index("ix_users_contributions", "github_contribution_count"),
+    )
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True)
     name: Mapped[str] = mapped_column(String(120))
@@ -72,7 +77,7 @@ class User(Base):
 
 class Group(Base):
     __tablename__ = "groups"
-    __table_args__ = (CheckConstraint("max_members >= 2", name="group_min_seats"),)
+    __table_args__ = (CheckConstraint("max_members >= 2", name="group_min_seats"), Index("ix_groups_created_at", "created_at"))
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True)
     name: Mapped[str] = mapped_column(String(160))
@@ -197,7 +202,10 @@ class ConversationParticipant(Base):
 
 class Message(Base):
     __tablename__ = "messages"
-    __table_args__ = (Index("ix_messages_conversation_created", "conversation_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_messages_conversation_created", "conversation_id", "created_at"),
+        Index("ix_messages_sender", "sender_id"),
+    )
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True)
     conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"))

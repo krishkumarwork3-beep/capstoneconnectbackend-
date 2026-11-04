@@ -34,6 +34,7 @@ from app.models import (
     utcnow,
 )
 from app.security import create_admin_token, hash_password, new_id, normalize_phone, verify_password
+from app.passwords import ensure_good_password
 from app.services import admin as ops
 from app.services import github, uploads
 from app.services import groups as rules
@@ -84,6 +85,7 @@ def change_own_password(payload: s.AdminPasswordIn, response: Response, admin: C
     """Changes your own password. Your other sessions end; this one gets a new cookie."""
     if not verify_password(payload.current_password, admin.password_hash):
         raise AppError("Your current password is wrong", 400)
+    ensure_good_password(payload.new_password)
     admin.password_hash = hash_password(payload.new_password)
     ops.record(db, admin, "admin.password", "Changed their own password", "admin", admin.id)
     db.commit()
@@ -291,6 +293,11 @@ def export_students(_: CurrentAdmin, db: DB, q: str | None = None, status: Stude
                              headers={"Content-Disposition": f'attachment; filename="capstoneconnect-students-{stamp}.csv"'})
 
 
+def _checked_hash(password: str, phone: str) -> str:
+    ensure_good_password(password, phone)
+    return hash_password(password)
+
+
 def _student(db, user_id: str) -> User:
     user = db.get(User, user_id)
     if user is None:
@@ -316,7 +323,7 @@ def create_student(payload: s.StudentCreateIn, admin: AdminWriter, db: DB):
         passing_year=payload.passing_year,
         phone=payload.phone.strip(),
         phone_normalized=phone,
-        password_hash=hash_password(payload.password),
+        password_hash=_checked_hash(payload.password, payload.phone),
         bio=payload.bio.strip(),
         skills=[x.strip() for x in payload.skills if x.strip()],
         github_url=f"https://github.com/{username}" if username else None,
@@ -364,6 +371,7 @@ def update_student(user_id: str, payload: s.StudentUpdateIn, admin: AdminWriter,
 def set_student_password(user_id: str, payload: s.PasswordSetIn, admin: AdminWriter, db: DB):
     """Sets a new password. Every session of that student ends (they sign in with the new one)."""
     user = _student(db, user_id)
+    ensure_good_password(payload.password, user.phone)
     user.password_hash = hash_password(payload.password)
     ops.end_sessions(db, [user.id])
     ops.record(db, admin, "user.password", f"Set a new password for {user.name}", "user", user.id)

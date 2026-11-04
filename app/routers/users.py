@@ -97,9 +97,13 @@ def update_user(user_id: str, payload: schemas.UserUpdateIn, db: DB, me: Current
     if user_id != me.id:
         raise AppError("You can only edit your own profile", 403)
     changes = payload.model_dump(exclude_unset=True)
-    for field in ("department", "bio", "skills", "avatar_url", "resume_url"):
+    for field in ("department", "bio", "skills"):
         if field in changes and changes[field] is not None:
             setattr(me, field, changes[field].strip() if isinstance(changes[field], str) else changes[field])
+    for field in ("avatar_url", "resume_url"):
+        if field in changes:  # only ever "" or null: remove the file
+            uploads.remove(getattr(me, field))
+            setattr(me, field, None)
 
     if "github_url" in changes:
         _apply_github(me, changes.get("github_url"), bool(changes.get("github_verified")))

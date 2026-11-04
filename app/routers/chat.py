@@ -1,5 +1,7 @@
 """Conversations and messages."""
 
+from datetime import datetime
+
 from fastapi import APIRouter, File, UploadFile
 from sqlalchemy import select
 
@@ -31,9 +33,10 @@ def get_conversation(conversation_id: str, db: DB, user: CurrentUser):
 
 
 @router.get("/conversations/{conversation_id}/messages", response_model=list[schemas.ChatMessageOut])
-def messages(conversation_id: str, db: DB, user: CurrentUser):
+def messages(conversation_id: str, db: DB, user: CurrentUser, before: datetime | None = None):
+    """The latest 500 messages; pass `before` (the oldest one's created_at) for older ones."""
     conv = chat.get_visible(db, conversation_id, user)
-    return [message_out(m) for m in chat.list_messages(db, conv)]
+    return [message_out(m) for m in chat.list_messages(db, conv, before)]
 
 
 @router.post("/conversations/{conversation_id}/messages", response_model=schemas.ChatMessageOut, status_code=201)
@@ -48,6 +51,7 @@ def send(conversation_id: str, payload: schemas.SendMessageIn, db: DB, user: Cur
             raise AppError("Upload the file first, then send it", 422)
         if db.scalar(select(Message.id).where(Message.attachment_url == attachment["url"]).limit(1)):
             raise AppError("That file was already sent. Upload it again to share it here.", 409)
+        attachment["size"] = uploads.stored_path(*parsed).stat().st_size  # the real size, not the client's
     message = chat.send_message(db, conv, user, payload.text, attachment, payload.client_id)
     db.commit()
     return message_out(message, payload.client_id)

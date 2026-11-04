@@ -82,8 +82,8 @@ class SignupIn(BaseModel):
 
 
 class LoginIn(BaseModel):
-    phone: str = Field(min_length=1)
-    password: str = Field(default="")
+    phone: str = Field(min_length=1, max_length=32)
+    password: str = Field(default="", max_length=200)
 
 
 class UserUpdateIn(BaseModel):
@@ -97,8 +97,17 @@ class UserUpdateIn(BaseModel):
     github_url: str | None = Field(default=None, max_length=300)
     github_verified: bool | None = None
     github_contribution_count: int | None = None
+    # Only "" or null (remove it): files are set by the upload endpoints, never from a link, so
+    # nobody can point their profile's résumé at another site or at someone else's private file.
     resume_url: str | None = None
     avatar_url: str | None = None
+
+    @field_validator("resume_url", "avatar_url")
+    @classmethod
+    def _only_clear(cls, value: str | None) -> str | None:
+        if value:
+            raise ValueError("upload the file instead; this field can only be cleared")
+        return value
 
     @field_validator("skills")
     @classmethod
