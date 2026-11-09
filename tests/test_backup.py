@@ -47,3 +47,19 @@ def test_backup_then_restore_into_a_fresh_database(tmp_path, as_user):
             assert c.scalar(text("select count(*) from messages where text = 'backed up'")) == 1
     finally:
         restored.dispose()
+
+
+def test_the_servers_own_major_version_of_the_tools_is_preferred(tmp_path, monkeypatch):
+    """A pg_restore newer than the server writes settings the server rejects (17+ into 16)."""
+    (tmp_path / "16" / "bin").mkdir(parents=True)
+    (tmp_path / "16" / "bin" / "pg_restore").write_text("")
+    monkeypatch.setattr(db_backup, "VERSIONED", str(tmp_path / "{major}" / "bin" / "{name}"))
+    assert db_backup.tool("pg_restore", 16) == str(tmp_path / "16" / "bin" / "pg_restore")
+    # Not installed for that version: the default tools, as before.
+    assert db_backup.tool("pg_restore", 15) != str(tmp_path / "15" / "bin" / "pg_restore")
+
+
+def test_the_server_version_is_read():
+    from app.db import engine
+
+    assert db_backup.server_major(engine.url.render_as_string(hide_password=False)) >= 14

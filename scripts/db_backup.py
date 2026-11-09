@@ -23,7 +23,32 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 
-def tool(name: str) -> str:
+# Debian/Ubuntu keep each installed major version's client tools here; /usr/bin/pg_dump is a
+# wrapper that picks the newest. A newer pg_dump/pg_restore than the server breaks restores (for
+# example pg_restore 17+ sends "SET transaction_timeout", which PostgreSQL 16 doesn't know), so the
+# server's own major version is used whenever it is installed.
+VERSIONED = "/usr/lib/postgresql/{major}/bin/{name}"
+
+
+def server_major(url: str) -> int | None:
+    """The server's major version (16 for 16.4), or None if it can't be asked."""
+    try:
+        import psycopg
+        from sqlalchemy.engine import make_url
+
+        dsn, _ = _libpq(url)
+        password = make_url(url).password
+        with psycopg.connect(dsn, password=password) if password else psycopg.connect(dsn) as conn:
+            return int(conn.execute("SHOW server_version_num").fetchone()[0]) // 10000
+    except Exception:  # noqa: BLE001 - only a preference; the default tools are used instead
+        return None
+
+
+def tool(name: str, major: int | None = None) -> str:
+    if major:
+        versioned = Path(VERSIONED.format(major=major, name=name))
+        if versioned.exists():
+            return str(versioned)
     found = shutil.which(name)
     if found:
         return found
@@ -54,7 +79,7 @@ def _libpq(url: str) -> tuple[str, dict]:
 def backup(url: str, out: Path) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
     dsn, env = _libpq(url)
-    subprocess.run([tool("pg_dump"), "--format=custom", "--no-owner", "--no-privileges", "--file", str(out), dsn],
+    subprocess.run([tool("pg_dump", server_major(url)), "--format=custom", "--no-owner", "--no-privileges", "--file", str(out), dsn],
                    check=True, env=env)
     return out
 
@@ -71,7 +96,7 @@ def restore(dump: Path, into: str, create: bool = False) -> None:
         with psycopg.connect(admin_dsn, password=password, autocommit=True) if password else psycopg.connect(admin_dsn, autocommit=True) as conn:
             conn.execute(f'CREATE DATABASE "{target.database}"')
     dsn, env = _libpq(into)
-    subprocess.run([tool("pg_restore"), "--no-owner", "--no-privileges", "--exit-on-error", "--dbname", dsn, str(dump)],
+    subprocess.run([tool("pg_restore", server_major(into)), "--no-owner", "--no-privileges", "--exit-on-error", "--dbname", dsn, str(dump)],
                    check=True, env=env)
 
 

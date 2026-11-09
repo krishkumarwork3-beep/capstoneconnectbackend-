@@ -32,6 +32,12 @@ jobs:
         run: |
           uv run alembic upgrade head
           uv run alembic check
+      - name: PostgreSQL 16 client tools (the server's major version; the runner's default is newer)
+        run: |
+          sudo apt-get install -y -qq postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y -qq postgresql-client-16
+          /usr/lib/postgresql/16/bin/pg_restore --version
       - name: Tests
         run: uv run pytest -q --ignore=tests/attacks
       - name: Attack tests (fuzzing, injection, auth, sessions, races, SSRF, uploads, abuse)
