@@ -78,12 +78,17 @@ def main() -> None:
     })
 
     if args.production_like:
+        import base64
         import secrets
 
         # As on a real HTTPS deployment (the API refuses to start otherwise).
         os.environ.update({
             "COOKIE_SECURE": "true",
             "SECRET_KEY": secrets.token_urlsafe(48),
+            # Production refuses the development field keys: fresh ones for this run (the e2e
+            # database is reseeded on every start, so nothing encrypted with them outlives it).
+            "FIELD_ENCRYPTION_KEYS": "e2e:" + base64.b64encode(os.urandom(32)).decode(),
+            "BLIND_INDEX_KEY": base64.b64encode(os.urandom(32)).decode(),
             "ALLOW_DEV_CODE": "false",
             "DEMO_LOGIN": "false",
             "SMS_PROVIDER": "console",
