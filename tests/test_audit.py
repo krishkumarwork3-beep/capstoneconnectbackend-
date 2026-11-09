@@ -173,7 +173,7 @@ def test_profile_links_cannot_be_set_by_hand(as_user):
     # Clearing works and deletes the file.
     url = student.post(f"/api/users/{OTHER}/avatar", files={"avatar": ("me.png", PNG, "image/png")}).json()["avatar_url"]
     assert student.patch(f"/api/users/{OTHER}", json={"avatar_url": None}).json().get("avatar_url") is None
-    assert TestClient(app).get(url[url.index("/uploads/"):]).status_code == 404
+    assert student.get(url[url.index("/uploads/"):]).status_code == 404  # deleted (visitors get 401 for anything)
 
 
 @pytest.mark.parametrize("password", ["password123", "PASSWORD123", "12345678", "aaaaaaaa", "qwertyuiop", "capstone123"])
@@ -253,14 +253,15 @@ def test_students_cannot_touch_others_things(as_user):
     assert outsider.delete("/api/groups/grp_1").status_code == 403
     assert outsider.delete(f"/api/groups/grp_1/members/{MEMBER}").status_code == 403
     group_chat = next(c["id"] for c in as_user(LEAD).get("/api/conversations").json() if c["type"] == "group")
-    assert outsider.get(f"/api/conversations/{group_chat}/messages").status_code == 403
-    assert outsider.post(f"/api/conversations/{group_chat}/messages", json={"text": "hi"}).status_code == 403
-    assert outsider.post(f"/api/conversations/{group_chat}/read").status_code == 403
+    # Someone else's conversation answers like a missing one (404), so ids can't be probed.
+    assert outsider.get(f"/api/conversations/{group_chat}/messages").status_code == 404
+    assert outsider.post(f"/api/conversations/{group_chat}/messages", json={"text": "hi"}).status_code == 404
+    assert outsider.post(f"/api/conversations/{group_chat}/read").status_code == 404
     # Someone else's join request can't be accepted, withdrawn or cancelled by an outsider.
     pending = as_user(LEAD).get("/api/requests", params={"direction": "received"}).json()
     req = next(r for r in pending if r["status"] == "pending")
     for status in ("accepted", "declined", "withdrawn", "cancelled"):
-        assert outsider.patch(f"/api/requests/{req['id']}", json={"status": status}).status_code in (403, 409)
+        assert outsider.patch(f"/api/requests/{req['id']}", json={"status": status}).status_code == 404  # no part in it: like a missing one
     # Recommendations are for the lead only.
     assert outsider.get("/api/recommendations").json() == []
     recs = as_user(LEAD).get("/api/recommendations").json()

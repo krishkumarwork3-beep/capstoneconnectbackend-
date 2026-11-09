@@ -46,12 +46,17 @@ def _calls(tree) -> set[str]:
 # --- SQL / LIKE ------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("term", ["%", "_", "%%", "\\", "a%", "_%_"])
+@pytest.mark.parametrize("term", ["%", "_", "%%", "\\", "a%", "_%_", "__", "\\\\"])
 def test_like_wildcards_are_matched_literally(as_user, admin_client, term):
-    """Searching "%" must not list everyone: wildcards in what a visitor types are escaped."""
+    """Searching "%" must not list everyone: wildcards in what a visitor types are escaped.
+    (Student searches now need two characters: one-character terms are refused outright.)"""
     student, admin = as_user("usr_8"), admin_client()
-    assert student.get("/api/users", params={"search": term}).json()["items"] == []
-    assert student.get("/api/groups", params={"search": term}).json()["items"] == []
+    for path in ("/api/users", "/api/groups"):
+        answer = student.get(path, params={"search": term})
+        if len(term) < 2:
+            assert answer.status_code == 422
+        else:
+            assert answer.json()["items"] == []
     assert admin.get("/api/admin/users", params={"q": term}).json()["items"] == []
     assert admin.get("/api/admin/groups", params={"q": term}).json()["items"] == []
 

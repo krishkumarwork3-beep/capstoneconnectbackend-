@@ -3,13 +3,14 @@
 from fastapi import APIRouter, Query
 from sqlalchemy import func, or_, select
 
-from app.services import limits as write_limits
-from app import search as like_text
 from app import schemas
-from app.deps import PathId, DB, CurrentUser, OptionalUser
+from app import search as like_text
+from app.deps import DB, CurrentUser, PathId
 from app.models import Group, GroupMember
 from app.serializers import group_out, request_out
 from app.services import groups as rules
+from app.services import limits as write_limits
+from app.services import reads
 
 router = APIRouter(prefix="/groups", tags=["groups"])
 
@@ -19,14 +20,15 @@ OPEN_WORDS = "open slot open slots vacancy vacancies"
 @router.get("", response_model=schemas.GroupPage)
 def list_groups(
     db: DB,
-    _: OptionalUser,
-    search: str | None = Query(default=None, max_length=100),
+    me: CurrentUser,
+    search: str | None = Query(default=None, min_length=reads.SEARCH_MIN, max_length=100),
     domain: str | None = Query(default=None, max_length=160),
     openOnly: bool = False,
-    cursor: str | None = Query(default=None, max_length=12),
-    limit: int = Query(default=10, ge=1, le=100),
+    cursor: str | None = Query(default=None, max_length=200),
+    limit: int = Query(default=reads.PAGE_DEFAULT, ge=1, le=reads.PAGE_MAX),
 ):
-    """Public: guests may browse. Search covers title, skills, domain and open seats only."""
+    """Signed-in students only (group pages name their members). Search covers title, skills,
+    domain and open seats only."""
     seats = select(func.count()).where(GroupMember.group_id == Group.id).correlate(Group).scalar_subquery()
     stmt = select(Group)
     if search and search.strip():
@@ -47,15 +49,14 @@ def list_groups(
     if openOnly:
         stmt = stmt.where(seats < Group.max_members)
 
-    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    start = int(cursor) if cursor and cursor.isdigit() else 0
-    items = db.scalars(stmt.order_by(Group.created_at.desc(), Group.id).offset(start).limit(limit)).unique().all()
-    next_index = start + limit
+    start = reads.read_cursor(cursor, "groups", me.id)
+    reads.page_read(db, me.id, "groups", start, bool(search and search.strip()))
+    rows = db.scalars(stmt.order_by(Group.created_at.desc(), Group.id).offset(start).limit(limit + 1)).unique().all()
+    items, more = rows[:limit], len(rows) > limit
     return {
         "items": [group_out(g) for g in items],
-        "nextCursor": str(next_index) if next_index < total else None,
-        "hasMore": next_index < total,
-        "total": total,
+        "nextCursor": reads.make_cursor("groups", me.id, start + limit) if more else None,
+        "hasMore": more,
     }
 
 

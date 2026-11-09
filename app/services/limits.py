@@ -125,7 +125,13 @@ WRITE_LIMITS: dict[str, tuple[int, timedelta]] = {
     # Socket only, but per account: ten sockets don't get ten times the budget.
     "typing": (60, timedelta(minutes=1)),
     "ws_ticket": (60, timedelta(minutes=10)),
-    "public_stats": (60, timedelta(minutes=1)),  # per IP address; PUBLIC_STATS_LIMIT_PER_IP
+    "stats_read": (60, timedelta(minutes=1)),  # GET /api/stats/signups, per signed-in account
+    # Reads (app.services.reads): the counts come from the READ_* settings; these are the windows.
+    "read_profile_view": (300, timedelta(minutes=10)),
+    "read_list_page": (200, timedelta(minutes=10)),
+    "read_search": (120, timedelta(minutes=10)),
+    "read_chat_history": (600, timedelta(minutes=10)),
+    "read_distinct": (80, timedelta(minutes=10)),
 }
 
 
@@ -134,6 +140,9 @@ def per_account(db: Session, action: str, who: str, limit: int | None = None) ->
     default, window = WRITE_LIMITS[action]
     limit = default if limit is None else limit
     count, start = db.execute(_HIT, {"key": f"{action}:who:{who}", "window": window}).one()
+    if random.random() < 0.01:
+        # Old windows are useless: drop them now and then (every window here is under a day).
+        db.execute(text("DELETE FROM rate_limits WHERE window_start < now() - interval '2 days'"))
     db.commit()
     if count > limit:
         raise _refuse(start + window - datetime.now(UTC))

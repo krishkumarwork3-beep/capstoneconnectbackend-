@@ -43,12 +43,14 @@ def _disposition(inline: bool, filename: str, fallback: str) -> str:
 @router.get("/{purpose}/{name}")
 def get_file(purpose: Literal["avatar", "resume", "attachment"], name: Annotated[str, PathParam(max_length=64)], request: Request,
              db: DB, user: OptionalUser):
+    # Every upload is personal data: visitors get nothing (avatars included), not even whether a
+    # name exists.
+    if user is None and not _is_admin(request, db):
+        raise AppError("Sign in to see this file", 401)
     if not uploads.is_ours(purpose, name):
         raise not_found("File")
 
     filename = name
-    if purpose == "resume" and user is None and not _is_admin(request, db):
-        raise AppError("Sign in to see résumés", 401)
     if purpose == "attachment":
         path = uploads.path_of(purpose, name)
         # Stored as a path; a full link from before the migration also matches.
@@ -56,8 +58,6 @@ def get_file(purpose: Literal["avatar", "resume", "attachment"], name: Annotated
             select(Message).where(or_(Message.attachment_url == path, Message.attachment_url.endswith(path))).limit(1)
         )
         if not _is_admin(request, db):
-            if user is None:
-                raise AppError("Sign in to see this file", 401)
             participant = message and db.scalar(
                 select(ConversationParticipant.user_id).where(
                     ConversationParticipant.conversation_id == message.conversation_id,
@@ -65,7 +65,7 @@ def get_file(purpose: Literal["avatar", "resume", "attachment"], name: Annotated
                 )
             )
             if not participant:
-                raise AppError("This file was sent in a conversation you are not part of", 403)
+                raise not_found("File")  # the same answer as a file that doesn't exist
         if message and message.attachment_name:
             filename = message.attachment_name
 
@@ -83,6 +83,6 @@ def get_file(purpose: Literal["avatar", "resume", "attachment"], name: Annotated
             "Content-Disposition": _disposition(False, filename, name),
             "X-Content-Type-Options": "nosniff",
             "Content-Security-Policy": "default-src 'none'; sandbox",
-            "Cache-Control": "public, max-age=86400" if purpose == "avatar" else "private, no-store",
+            "Cache-Control": "private, max-age=86400" if purpose == "avatar" else "private, no-store",
         },
     )

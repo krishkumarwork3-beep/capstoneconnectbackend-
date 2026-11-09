@@ -47,7 +47,8 @@ def test_s3_backend_keeps_every_rule(s3, as_user, admin_client):
     assert sorted(s3.keys()) == sorted([_path(avatar)[len("/uploads/"):], _path(resume)[len("/uploads/"):]])
     assert s3.client.list_objects_v2(Bucket="cc-test")["KeyCount"] == 2  # under the "uploads/" prefix
     guest = TestClient(app)
-    assert guest.get(_path(avatar)).content == PNG
+    assert guest.get(_path(avatar)).status_code == 401
+    assert lead.get(_path(avatar)).content == PNG
     assert guest.get(_path(resume)).status_code == 401
     assert lead.get(_path(resume)).content == PDF
 
@@ -55,13 +56,13 @@ def test_s3_backend_keeps_every_rule(s3, as_user, admin_client):
     att = lead.post("/api/uploads/attachments", files={"file": ("n.pdf", PDF, "application/pdf")}).json()
     assert lead.post(f"/api/conversations/{conv}/messages", json={"text": "", "attachment": att}).status_code == 201
     assert member.get(_path(att["url"])).content == PDF
-    assert student.get(_path(att["url"])).status_code == 403
+    assert student.get(_path(att["url"])).status_code == 404
     assert admin_client().get(_path(att["url"])).status_code == 200
 
     # Removing the photo deletes the object.
     assert admin_client().delete(f"/api/admin/users/{OTHER}/avatar").status_code == 200
     assert not s3.exists(_path(avatar)[len("/uploads/"):])
-    assert guest.get(_path(avatar)).status_code == 404
+    assert lead.get(_path(avatar)).status_code == 404
 
 
 def test_migration_script_copies_local_files_to_s3(tmp_path, s3):
@@ -109,13 +110,13 @@ def test_links_saved_before_the_change_still_work_for_the_right_people(as_user, 
 
     # Before the migration: the old full links still resolve, with the same rules.
     assert member.get("/uploads/attachment/att_00000000000000bb.pdf").content == PDF
-    assert outsider.get("/uploads/attachment/att_00000000000000bb.pdf").status_code == 403
+    assert outsider.get("/uploads/attachment/att_00000000000000bb.pdf").status_code == 404
     assert TestClient(app).get("/uploads/resume/res_00000000000000aa.pdf").status_code == 401
     assert lead.get("/uploads/resume/res_00000000000000aa.pdf").content == PDF
 
     # Old links reach the browser rewritten to the current domain.
     assert member.get("/uploads/attachment/att_00000000000000bb.pdf").content == PDF
-    assert outsider.get("/uploads/attachment/att_00000000000000bb.pdf").status_code == 403
+    assert outsider.get("/uploads/attachment/att_00000000000000bb.pdf").status_code == 404
     messages = member.get(f"/api/conversations/{conv}/messages").json()
     old = next(m for m in messages if m["id"] == "msg_old")
     assert old["attachment"]["url"] == f"{get_settings().public_base_url}/uploads/attachment/att_00000000000000bb.pdf"

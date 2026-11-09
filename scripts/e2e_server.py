@@ -70,7 +70,9 @@ def main() -> None:
         "SIGNUP_LIMIT_PER_IP": "500",
         "RESET_LIMIT_PER_IP": "500",
         "VERIFY_LIMIT_PER_IP": "500",
-        "PUBLIC_STATS_LIMIT_PER_IP": "100000",
+        # Every test reads as a handful of seeded accounts: the read budgets would trip.
+        "READ_LIMIT_PROFILES": "100000", "READ_LIMIT_PAGES": "100000", "READ_LIMIT_SEARCHES": "100000",
+        "READ_LIMIT_CHAT_PAGES": "100000", "SUSPICIOUS_DISTINCT_PROFILES": "100000",
         "CORS_ORIGINS": '["http://localhost:3000","http://127.0.0.1:3000","http://localhost:3100"]',
         "PUBLIC_BASE_URL": f"http://localhost:{args.port}",
     })

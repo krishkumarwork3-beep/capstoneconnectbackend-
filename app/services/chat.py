@@ -66,7 +66,7 @@ def get_visible(db: Session, conversation_id: str, user: User) -> Conversation:
     if conv is None:
         raise not_found("Conversation")
     if not any(p.user_id == user.id for p in conv.participants):
-        raise AppError("You do not have access to this conversation", 403)
+        raise not_found("Conversation")  # ids can't be probed: the same answer as a missing one
     return conv
 
 
@@ -90,7 +90,7 @@ def get_or_create_direct(db: Session, me: User, other_id: str) -> Conversation:
     return conv
 
 
-MESSAGE_PAGE = 500
+MESSAGE_PAGE = 50
 
 
 def list_messages(db: Session, conv: Conversation, before: datetime | None = None) -> list[Message]:
@@ -146,7 +146,7 @@ def send_message(
 def _participant(conv: Conversation, user_id: str) -> ConversationParticipant:
     participant = next((p for p in conv.participants if p.user_id == user_id), None)
     if participant is None:
-        raise AppError("You do not have access to this conversation", 403)
+        raise not_found("Conversation")
     return participant
 
 

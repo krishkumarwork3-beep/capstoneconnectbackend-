@@ -154,3 +154,15 @@ def ws_connect(client, **kwargs):
     with client.websocket_connect("/api/ws", **kwargs) as ws:
         ws.send_text(json.dumps({"type": "auth", "ticket": ticket or "no-ticket"}))
         yield ws
+
+
+def all_items(client, path: str, **params) -> list[dict]:
+    """Every item of a paged list, following nextCursor (pages are capped at 50, no total)."""
+    items, cursor = [], None
+    while True:
+        query = {**params, "limit": 50, **({"cursor": cursor} if cursor else {})}
+        page = client.get(path, params=query).json()
+        items += page["items"]
+        cursor = page["nextCursor"]
+        if not cursor:
+            return items

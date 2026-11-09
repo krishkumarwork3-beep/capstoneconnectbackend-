@@ -6,13 +6,13 @@ from fastapi import APIRouter, File, Response, UploadFile
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 
-from app.services import limits as write_limits
 from app import schemas
-from app.deps import PathId, DB, CurrentUser
-from app.serializers import conversation_out, message_out
+from app.deps import DB, CurrentUser, PathId
 from app.errors import AppError
 from app.models import Message
-from app.services import chat, uploads
+from app.serializers import conversation_out, message_out
+from app.services import chat, reads, uploads
+from app.services import limits as write_limits
 
 router = APIRouter(tags=["chat"])
 
@@ -36,7 +36,8 @@ def get_conversation(conversation_id: PathId, db: DB, user: CurrentUser):
 
 @router.get("/conversations/{conversation_id}/messages", response_model=list[schemas.ChatMessageOut])
 def messages(conversation_id: PathId, db: DB, user: CurrentUser, before: datetime | None = None):
-    """The latest 500 messages; pass `before` (the oldest one's created_at) for older ones."""
+    """The latest 50 messages; pass `before` (the oldest one's created_at) for older ones."""
+    reads.count(db, "chat_history", user.id)
     conv = chat.get_visible(db, conversation_id, user)
     return [message_out(m) for m in chat.list_messages(db, conv, before)]
 

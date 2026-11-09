@@ -2,23 +2,27 @@
 import pytest
 
 from app.services import github
-from tests.conftest import REAL_PNG
+from tests.conftest import all_items, REAL_PNG
 
 
 def test_discover_search_filters_and_sorts(as_user):
     c = as_user("usr_1")
-    everyone = c.get("/api/users?limit=200").json()
-    assert everyone["total"] == 18
+    assert len(all_items(c, "/api/users")) == 18
     assert {u["id"] for u in c.get("/api/users?search=pytorch&limit=50").json()["items"]} >= {"usr_1"}
-    looking = c.get("/api/users?hasGroup=false&limit=50").json()
-    assert looking["total"] == 8 and all(u["group_id"] is None for u in looking["items"])
-    assert c.get("/api/users?search=looking&limit=50").json()["total"] == 8
+    looking = all_items(c, "/api/users", hasGroup="false")
+    assert len(looking) == 8 and all(u["group_id"] is None for u in looking)
+    assert len(all_items(c, "/api/users", search="looking")) == 8
     ranked = [u["github_contribution_count"] for u in c.get("/api/users?sort=contributions&limit=50").json()["items"]]
     numbers = [n for n in ranked if n is not None]
     assert numbers == sorted(numbers, reverse=True) and ranked[: len(numbers)] == numbers  # unranked last
     names = [u["name"] for u in c.get("/api/users?sort=name&limit=50").json()["items"]]
     assert names == sorted(names, key=str.lower)
-    page = c.get("/api/users?limit=5&cursor=15").json()
+    # Cursors are opaque now: walk 5 at a time; the 4th page holds the last 3 of 18.
+    cursor = None
+    for _ in range(3):
+        page = c.get("/api/users", params={"limit": 5, **({"cursor": cursor} if cursor else {})}).json()
+        cursor = page["nextCursor"]
+    page = c.get("/api/users", params={"limit": 5, "cursor": cursor}).json()
     assert len(page["items"]) == 3 and page["hasMore"] is False and page["nextCursor"] is None
 
 
@@ -68,7 +72,7 @@ def test_uploads_check_content(as_user):
 def test_chat_visibility_unread_and_direct(as_user):
     lead, member, outsider = as_user("usr_1"), as_user("usr_9"), as_user("usr_8")
     group_chat = next(c for c in lead.get("/api/conversations").json() if c["type"] == "group")
-    assert outsider.get(f"/api/conversations/{group_chat['id']}/messages").status_code == 403
+    assert outsider.get(f"/api/conversations/{group_chat['id']}/messages").status_code == 404  # same as a missing one
 
     sent = member.post(f"/api/conversations/{group_chat['id']}/messages", json={"text": "  standup at 6  "})
     assert sent.status_code == 201 and sent.json()["text"] == "standup at 6"

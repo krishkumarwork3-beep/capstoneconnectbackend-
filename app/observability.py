@@ -61,6 +61,8 @@ class RequestContextMiddleware:
                     (b"x-content-type-options", b"nosniff"),
                     (b"referrer-policy", b"strict-origin-when-cross-origin"),
                     (b"cross-origin-opener-policy", b"same-origin"),
+                    # Nothing the API serves belongs in a search engine.
+                    (b"x-robots-tag", b"noindex, nofollow, noarchive"),
                 ]
                 if path in ("/docs", "/redoc", "/openapi.json") or path.startswith("/docs-assets/"):
                     extra.append((b"content-security-policy", _docs_csp().encode()))

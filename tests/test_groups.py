@@ -19,7 +19,8 @@ def request_status(client, request_id):
 
 def test_board_search_and_filters(as_user):
     c = as_user("usr_8")
-    assert c.get("/api/groups?limit=50").json()["total"] == 6
+    board = c.get("/api/groups?limit=50").json()
+    assert len(board["items"]) == 6 and board["hasMore"] is False
     assert [g["id"] for g in c.get("/api/groups?search=ros 2").json()["items"]] == ["grp_1"]
     full = {g["id"] for g in c.get("/api/groups?search=full&limit=50").json()["items"]}
     assert "grp_3" in full and "grp_1" not in full
@@ -63,7 +64,8 @@ def test_join_request_rules(as_user):
     # Withdraw your own pending request; nobody else can.
     other = as_user("usr_7")
     request_id = created.json()["id"]
-    assert other.patch(f"/api/requests/{request_id}", json={"status": "withdrawn"}).status_code == 403
+    # Someone with no part in it gets the answer a missing request gets.
+    assert other.patch(f"/api/requests/{request_id}", json={"status": "withdrawn"}).status_code == 404
     assert looking.patch(f"/api/requests/{request_id}", json={"status": "withdrawn"}).json()["status"] == "withdrawn"
 
 

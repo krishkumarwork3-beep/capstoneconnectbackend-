@@ -21,13 +21,10 @@ PUBLIC = {
     ("POST", "/api/auth/password/forgot"),
     ("POST", "/api/auth/password/verify"),
     ("POST", "/api/auth/password/reset"),
-    ("GET", "/api/groups"),                  # guests browse the board
     ("GET", "/api/reports/reasons"),
     ("GET", "/api/announcements"),           # the banner shows to guests too
     ("GET", "/api/github/verify"),           # used during sign-up, before an account exists
     ("GET", "/api/health"),
-    ("GET", "/api/stats/signups"),         # one aggregate number, cached, limited per IP
-    ("GET", "/uploads/{purpose}/{name}"),    # avatars public; résumés/attachments checked inside
     ("POST", "/api/admin/auth/login"),
     ("POST", "/api/admin/auth/logout"),
 }
@@ -44,7 +41,7 @@ def classify(method: str, path: str) -> str:
         return "public"
     if path.startswith("/api/admin/"):
         return "admin"
-    if path.startswith("/api/") and path not in WEBSOCKETS:
+    if (path.startswith("/api/") and path not in WEBSOCKETS) or path.startswith("/uploads/"):
         return "student"
     raise AssertionError(f"{method} {path} is not classified: add it to the inventory")
 
@@ -63,7 +60,8 @@ def test_every_route_is_classified():
 
 
 def _call(client: TestClient, method: str, path: str):
-    url = re.sub(r"\{[^}]+\}", "x", path)
+    url = path.replace("{purpose}", "avatar").replace("{name}", "ava_0123456789abcdef.png")
+    url = re.sub(r"\{[^}]+\}", "x", url)
     return client.request(method, url, json={} if method not in ("GET", "DELETE") else None)
 
 
@@ -105,3 +103,38 @@ def test_no_route_accepts_unexpected_methods(client):
     r = client.post("/api/groups/grp_1", headers={"X-HTTP-Method-Override": "DELETE"}, json={})
     assert r.status_code == 405
     assert client.get("/api/groups/grp_1", headers={"X-HTTP-Method-Override": "DELETE"}).status_code == 401
+
+
+# Anything a visitor (no session) may call, and why. Everything else must answer 401/403, before
+# reading the body or touching any data.
+ANONYMOUS_ALLOWED = {
+    ("POST", "/api/auth/signup"): "creating an account",
+    ("POST", "/api/auth/login"): "signing in",
+    ("POST", "/api/auth/logout"): "harmless when signed out",
+    ("POST", "/api/auth/refresh"): "renews a session from its refresh cookie (401 without one)",
+    ("POST", "/api/auth/demo-login/{user_id}"): "404 unless DEMO_LOGIN=true, never in production",
+    ("POST", "/api/auth/password/forgot"): "password reset, step 1 (generic answer)",
+    ("POST", "/api/auth/password/verify"): "password reset, step 2",
+    ("POST", "/api/auth/password/reset"): "password reset, step 3",
+    ("GET", "/api/reports/reasons"): "a fixed list of report reasons, no data",
+    ("GET", "/api/announcements"): "admin-written banners, no user data",
+    ("GET", "/api/github/verify"): "sign-up checks a GitHub username (public GitHub data, limited per IP)",
+    ("GET", "/api/health"): "load balancer health check, no data",
+    ("POST", "/api/admin/auth/login"): "admin sign-in",
+    ("POST", "/api/admin/auth/logout"): "harmless when signed out",
+    ("POST", "/api/admin/auth/refresh"): "renews an admin session from its refresh cookie (401 without one)",
+}
+
+
+def test_every_route_refuses_anonymous_callers_except_the_allowlist(client):
+    """A1/A2: walks every route in the OpenAPI schema with no session."""
+    for method, path in sorted(_routes()):
+        if (method, path) in ANONYMOUS_ALLOWED:
+            continue
+        response = _call(client, method, path)
+        assert response.status_code in (401, 403), f"{method} {path}: anonymous got {response.status_code}"
+        assert "items" not in response.text and "total" not in response.text
+
+
+def test_the_allowlist_has_no_stale_entries():
+    assert set(ANONYMOUS_ALLOWED) <= _routes() | {("POST", "/api/auth/refresh"), ("POST", "/api/admin/auth/refresh")}

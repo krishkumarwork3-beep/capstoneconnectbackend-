@@ -9,7 +9,7 @@ from sqlalchemy import text
 
 from app import schemas
 from app.config import get_settings
-from app.deps import DB, CurrentUser, OptionalUser
+from app.deps import DB, CurrentUser, OptionalUser, StudentOrAdmin
 from app.errors import AppError
 from app.models import utcnow
 from app.services import chat, github, stats
@@ -41,11 +41,11 @@ def presence(db: DB, user: CurrentUser):
 
 
 @router.get("/stats/signups", response_model=schemas.SignupTotalOut)
-def signup_total(request: Request, response: Response, db: DB):
-    """Public, aggregate only: how many students have signed up (no names, ids or dates).
-    Cached for 60 s and limited per address."""
-    write_limits.per_account(db, "public_stats", f"ip:{write_limits.client_ip(request)}", get_settings().public_stats_limit_per_ip)
-    response.headers["Cache-Control"] = "public, max-age=60"
+def signup_total(response: Response, db: DB, who: StudentOrAdmin):
+    """Signed-in students (and admins) only: how many students have signed up. Never shown to a
+    visitor; never kept by a shared cache. Limited per account."""
+    write_limits.per_account(db, "stats_read", who)
+    response.headers["Cache-Control"] = "private, no-store"
     return {"total": stats.cached_signup_total(db)}
 
 

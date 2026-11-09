@@ -66,10 +66,11 @@ class ResumeOut(Out):
 
 
 class UserPage(Out):
+    """No total: a global count of students helps nobody but a scraper."""
+
     items: list[UserOut]
     nextCursor: str | None = None
     hasMore: bool
-    total: int
 
 
 def _clean_list(values: list[str]) -> list[str]:
@@ -202,7 +203,6 @@ class GroupPage(Out):
     items: list[GroupOut]
     nextCursor: str | None = None
     hasMore: bool
-    total: int
 
 
 class GroupCreateIn(In):

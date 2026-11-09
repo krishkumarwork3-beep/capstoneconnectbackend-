@@ -57,10 +57,17 @@ def test_duplicate_json_keys_are_refused(as_user):
     assert r.status_code == 400
 
 
-@pytest.mark.parametrize("url", ["/api/users?limit=100000", "/api/groups?limit=5000", "/api/users?cursor=" + "9" * 40,
-                                 "/api/users?limit=-1", "/api/groups?limit=0", "/api/groups?cursor=" + "9" * 40])
+@pytest.mark.parametrize("url", ["/api/users?limit=100000", "/api/groups?limit=5000", "/api/users?limit=51",
+                                 "/api/users?limit=-1", "/api/groups?limit=0", "/api/groups?limit=51"])
 def test_page_sizes_are_capped(as_user, url):
     assert as_user("usr_8").get(url).status_code == 422
+
+
+# Rewritten for opaque cursors: a made-up number is not a cursor (400), a huge one is too long (422).
+@pytest.mark.parametrize("url,status", [("/api/users?cursor=" + "9" * 40, 400), ("/api/groups?cursor=" + "9" * 40, 400),
+                                        ("/api/users?cursor=" + "9" * 400, 422), ("/api/groups?cursor=" + "9" * 400, 422)])
+def test_made_up_cursors_are_refused(as_user, url, status):
+    assert as_user("usr_8").get(url).status_code == status
 
 
 def test_admin_page_sizes_are_capped(admin_client):

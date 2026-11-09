@@ -43,7 +43,7 @@ def test_login_logout(client):
 
 def test_pages_need_a_session(client):
     assert client.get("/api/users").json() == {"message": "Sign in to continue"}
-    assert client.get("/api/groups").status_code == 200  # guests may browse groups
+    assert client.get("/api/groups").json() == {"message": "Sign in to continue"}  # groups name their members: no guests
 
 
 def test_bearer_token_also_works(client):

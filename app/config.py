@@ -28,8 +28,17 @@ class Settings(BaseSettings):
     # A sign-in unused this long ends (sliding); none outlives SESSION_MAX_DAYS from sign-in,
     # whatever its expires_at says (absolute). Both enforced for HTTP and the live socket.
     session_idle_days: int = Field(default=7, ge=1)
-    # GET /api/stats/signups per IP address per minute (raised for end-to-end runs from one address).
-    public_stats_limit_per_ip: int = Field(default=60, ge=1)
+    # Per-account READ budgets per 10 minutes (anti-scraping, app.services.reads): profile views,
+    # list pages, searches and chat-history pages. Over them: 429.
+    read_limit_profiles: int = Field(default=300, ge=1)
+    read_limit_pages: int = Field(default=200, ge=1)
+    read_limit_searches: int = Field(default=120, ge=1)
+    read_limit_chat_pages: int = Field(default=600, ge=1)
+    # Suspicious reading: more distinct profiles than this in 10 minutes, or paging to this offset
+    # in a list, writes an audit-log entry and throttles the account's reads for a while.
+    suspicious_distinct_profiles: int = Field(default=80, ge=1)
+    suspicious_list_depth: int = Field(default=400, ge=1)
+    read_throttle_minutes: int = Field(default=15, ge=1)
     session_max_days: int = Field(default=30, ge=1, le=30)
     # Cookies need Secure over HTTPS (production); local http://localhost needs it off.
     cookie_secure: bool = False

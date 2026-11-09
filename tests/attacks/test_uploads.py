@@ -150,8 +150,10 @@ def test_downloads_are_always_attachments_with_fixed_types(as_user):
     "/uploads/avatar/ava_0123456789abcdef.png/..", "/uploads/avatar/....//....//.env", "/uploads/resume/C:%5Cwindows%5Cwin.ini",
     "/uploads/x/ava_0123456789abcdef.png", "/uploads/avatar/AVA_0123456789ABCDEF.PNG", "/uploads/avatar/ava_0123456789abcdef.php",
 ])
-def test_path_traversal_finds_nothing(client, path):
-    r = client.get(path)
+def test_path_traversal_finds_nothing(client, as_user, path):
+    # A visitor is refused before anything is looked up; a signed-in student still finds nothing.
+    assert client.get(path).status_code in (400, 401, 404, 422), path
+    r = as_user("usr_8").get(path)
     assert r.status_code in (400, 404, 422), (path, r.status_code)
     assert b"SECRET" not in r.content and b"DATABASE_URL" not in r.content
 

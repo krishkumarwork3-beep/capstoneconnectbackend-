@@ -351,8 +351,10 @@ def respond_request(db: Session, request_id: str, status: str, actor: User) -> J
     if status not in ("accepted", "declined", "withdrawn", "cancelled"):
         raise AppError("Choose accept or decline")
     peek = db.get(JoinRequest, request_id)
-    if peek is None:
-        raise not_found("Request")
+    group_of_peek = db.get(Group, peek.group_id) if peek and peek.group_id else None
+    in_group = bool(group_of_peek and any(m.user_id == actor.id for m in group_of_peek.members))
+    if peek is None or (actor.id not in (peek.sender_id, peek.receiver_id) and not in_group):
+        raise not_found("Request")  # no part in it: the same answer as a missing request
     group = get_group(db, peek.group_id, lock=True) if peek.group_id else None
     student_id = peek.sender_id if peek.type == "join_request" else peek.receiver_id
     if student_id:

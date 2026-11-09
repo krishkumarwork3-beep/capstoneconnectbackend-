@@ -8,14 +8,14 @@ from fastapi import APIRouter, BackgroundTasks, File, Query, UploadFile
 from sqlalchemy import String, cast, exists, func, or_, select
 from sqlalchemy.orm import Session
 
-from app.services import limits as write_limits
-from app import search as like_text
 from app import schemas
-from app.deps import PathId, DB, CurrentUser
+from app import search as like_text
+from app.deps import DB, CurrentUser, PathId
 from app.errors import AppError, not_found
 from app.models import GroupMember, User
 from app.serializers import request_out, user_out
-from app.services import github, groups, uploads
+from app.services import github, groups, reads, uploads
+from app.services import limits as write_limits
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/users", tags=["users"])
@@ -35,13 +35,13 @@ def _get_user(db: Session, user_id: PathId) -> User:
 def list_users(
     db: DB,
     me: CurrentUser,
-    search: str | None = Query(default=None, max_length=100),
+    search: str | None = Query(default=None, min_length=reads.SEARCH_MIN, max_length=100),
     college: str | None = Query(default=None, max_length=160),
     passing_year: int | None = Query(default=None, ge=1900, le=2200),
     hasGroup: bool | None = None,
     sort: Literal["relevance", "contributions", "name"] = "relevance",
-    cursor: str | None = Query(default=None, max_length=12),
-    limit: int = Query(default=10, ge=1, le=200),
+    cursor: str | None = Query(default=None, max_length=200),
+    limit: int = Query(default=reads.PAGE_DEFAULT, ge=1, le=reads.PAGE_MAX),
 ):
     """Search covers name, college, graduation year, skills and group status (never bios)."""
     in_group = exists().where(GroupMember.user_id == User.id)
@@ -67,7 +67,8 @@ def list_users(
     if hasGroup is not None:
         stmt = stmt.where(in_group if hasGroup else ~in_group)
 
-    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    start = reads.read_cursor(cursor, "users", me.id)
+    reads.page_read(db, me.id, "users", start, bool(search and search.strip()))
     if sort == "contributions":
         # Ranked students first; students with no total yet stay unranked rather than showing 0.
         stmt = stmt.order_by(User.github_contribution_count.desc().nulls_last(), User.created_at, User.id)
@@ -76,20 +77,20 @@ def list_users(
     else:
         stmt = stmt.order_by(User.created_at, User.id)
 
-    start = int(cursor) if cursor and cursor.isdigit() else 0
-    items = db.scalars(stmt.offset(start).limit(limit)).unique().all()
-    next_index = start + limit
+    # One extra row tells whether there is a next page, without counting the whole table.
+    rows = db.scalars(stmt.offset(start).limit(limit + 1)).unique().all()
+    items, more = rows[:limit], len(rows) > limit
     visible = groups.phone_visible_ids(db, me, [u.id for u in items])
     return {
         "items": [user_out(u, u.id in visible) for u in items],
-        "nextCursor": str(next_index) if next_index < total else None,
-        "hasMore": next_index < total,
-        "total": total,
+        "nextCursor": reads.make_cursor("users", me.id, start + limit) if more else None,
+        "hasMore": more,
     }
 
 
 @router.get("/{user_id}", response_model=schemas.UserOut)
 def get_user(user_id: PathId, db: DB, me: CurrentUser, background: BackgroundTasks):
+    reads.profile_viewed(db, me.id, user_id)
     user = _get_user(db, user_id)
     if user.github_verified and github.is_stale(user.github_synced_at):
         background.add_task(github.sync_user, user.id, True)  # the next view shows the fresh total

@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from app.check_config import problems, startup_check
 from app.config import DEV_SECRET_KEY, Settings, get_settings
 from app.main import app
-from tests.conftest import PASSWORD, PHONES
+from tests.conftest import all_items, PASSWORD, PHONES
 
 LEAD, MEMBER, LOOKING, OTHER = "usr_1", "usr_9", "usr_6", "usr_8"
 PNG = __import__("tests.conftest", fromlist=["REAL_PNG"]).REAL_PNG  # a real 8x8 image (uploads are re-encoded)
@@ -127,13 +127,13 @@ def test_phone_numbers_are_only_shown_to_people_who_know_you(as_user):
     assert mate["phone_visible"] is True and "•" not in mate["phone"]
     stranger = lead.get(f"/api/users/{OTHER}").json()
     assert stranger["phone_visible"] is False and stranger["phone"] == "+91 92••• ••234"
-    listed = {u["id"]: u for u in lead.get("/api/users", params={"limit": 200}).json()["items"]}
+    listed = {u["id"]: u for u in all_items(lead, "/api/users")}
     assert listed[MEMBER]["phone_visible"] and not listed[OTHER]["phone_visible"]
     assert all("•" in u["phone"] for u in listed.values() if not u["phone_visible"])
 
     # A Looking student sees nobody's number but their own.
     looking = as_user(OTHER)
-    others = [u for u in looking.get("/api/users", params={"limit": 200}).json()["items"] if u["id"] != OTHER]
+    others = [u for u in all_items(looking, "/api/users") if u["id"] != OTHER]
     assert others and not any(u["phone_visible"] for u in others)
 
 
@@ -156,12 +156,13 @@ def _path(url: str) -> str:
     return url.split("8000", 1)[-1] if "8000" in url else url[url.index("/uploads/"):]
 
 
-def test_avatars_are_public_resumes_need_a_sign_in(as_user, client):
+def test_avatars_and_resumes_need_a_sign_in(as_user, client):
     student = as_user(OTHER)
     avatar = student.post(f"/api/users/{OTHER}/avatar", files={"avatar": ("me.png", PNG, "image/png")}).json()["avatar_url"]
     resume = student.post(f"/api/users/{OTHER}/resume", files={"resume": ("cv.pdf", PDF, "application/pdf")}).json()["resume_url"]
     guest = TestClient(app)
-    r = guest.get(_path(avatar))
+    assert guest.get(_path(avatar)).status_code == 401  # visitors get no photos either
+    r = as_user(LEAD).get(_path(avatar))
     assert r.status_code == 200 and r.headers["content-type"] == "image/png" and r.headers["x-content-type-options"] == "nosniff"
     assert guest.get(_path(resume)).status_code == 401
     r = as_user(LEAD).get(_path(resume))
@@ -174,14 +175,14 @@ def test_attachments_are_only_for_the_conversation(as_user, admin_client):
     lead, member, outsider = as_user(LEAD), as_user(MEMBER), as_user(OTHER)
     group = next(c for c in lead.get("/api/conversations").json() if c["type"] == "group")
     att = lead.post("/api/uploads/attachments", files={"file": ("notes.pdf", PDF, "application/pdf")}).json()
-    # Not sent yet: nobody else can read it.
-    assert member.get(_path(att["url"])).status_code == 403
+    # Not sent yet: nobody else can read it (the answer a missing file gets).
+    assert member.get(_path(att["url"])).status_code == 404
     assert lead.post(f"/api/conversations/{group['id']}/messages", json={"text": "", "attachment": att}).status_code == 201
     r = member.get(_path(att["url"]))
     assert r.status_code == 200 and r.content == PDF
     # Downloads under its own name (a link to another origin can't ask for that itself).
     assert r.headers["content-disposition"].startswith("attachment") and 'filename="notes.pdf"' in r.headers["content-disposition"]
-    assert outsider.get(_path(att["url"])).status_code == 403
+    assert outsider.get(_path(att["url"])).status_code == 404
     assert TestClient(app).get(_path(att["url"])).status_code == 401
     assert admin_client().get(_path(att["url"])).status_code == 200
 
@@ -200,8 +201,9 @@ def test_attachments_are_only_for_the_conversation(as_user, admin_client):
     "/uploads/secrets/ava_0123456789abcdef.png",
     "/uploads/avatar/ava_0123456789abcdef.png",
 ])
-def test_path_traversal_and_unknown_files(client, path):
-    assert client.get(path).status_code in (404, 422)
+def test_path_traversal_and_unknown_files(as_user, path):
+    # Signed in (visitors are refused before any lookup): still nothing to find.
+    assert as_user(OTHER).get(path).status_code in (404, 422)
 
 
 def test_renamed_executables_and_large_files_are_refused(as_user):
@@ -226,7 +228,7 @@ def test_admin_removes_a_photo_and_resume_and_the_files(as_user, admin_client):
     assert admin_client("viewer").delete(f"/api/admin/users/{OTHER}/avatar").status_code == 403
     detail = admin.delete(f"/api/admin/users/{OTHER}/avatar").json()
     assert detail["avatar_url"] is None
-    assert TestClient(app).get(_path(avatar)).status_code == 404  # gone from disk
+    assert student.get(_path(avatar)).status_code == 404  # gone from disk
     assert admin.delete(f"/api/admin/users/{OTHER}/resume").json()["resume_url"] is None
     assert admin.get(_path(resume)).status_code == 404
     assert admin.delete(f"/api/admin/users/{OTHER}/resume").status_code == 409

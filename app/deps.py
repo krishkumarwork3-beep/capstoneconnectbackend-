@@ -79,4 +79,15 @@ def admin_writer(admin: Annotated[AdminUser, Depends(current_admin)]) -> AdminUs
 
 
 CurrentAdmin = Annotated[AdminUser, Depends(current_admin)]
+
+
+def student_or_admin(request: Request, db: DB) -> str:
+    """The signed-in student's id, else the signed-in admin's ("admin:<id>"); 401 for visitors."""
+    user = optional_user(request, db)
+    if user is not None:
+        return user.id
+    return f"admin:{current_admin(request, db).id}"
+
+
+StudentOrAdmin = Annotated[str, Depends(student_or_admin)]
 AdminWriter = Annotated[AdminUser, Depends(admin_writer)]
