@@ -19,7 +19,9 @@ from sqlalchemy.exc import IntegrityError
 
 from app import search as like_text
 from app.links import csv_cell
+from app.serializers import mask_phone
 from app import admin_schemas as s
+from app import crypto
 from app.config import get_settings
 from app.cookies import admin_cookie, admin_refresh_cookie, clear_sign_in_cookies, set_sign_in_cookies
 from app.deps import PathId, DB, AdminWriter, CurrentAdmin
@@ -263,7 +265,8 @@ def _student_query(q: str | None, status: StudentStatus, college: str | None):
         digits = normalize_phone(q) if any(c.isdigit() for c in q) else ""
         conditions = [func.lower(User.name).like(like, escape=like_text.ESCAPE), func.lower(User.college).like(like, escape=like_text.ESCAPE), User.id == q.strip()]
         if digits:
-            conditions.append(User.phone_normalized.like(f"%{digits[-10:]}%"))
+            # Numbers are encrypted: a whole number is found by its blind index (no partial match).
+            conditions.append(User.phone_hash == crypto.phone_hash(digits))
         stmt = stmt.where(or_(*conditions))
     if college:
         stmt = stmt.where(User.college == college)
@@ -383,7 +386,7 @@ def create_student(payload: s.StudentCreateIn, admin: AdminWriter, db: DB):
     except IntegrityError as exc:
         db.rollback()
         raise AppError("Another account already uses this phone number", 409) from exc
-    ops.record(db, admin, "user.create", f"Created student {user.name} ({user.phone})", "user", user.id)
+    ops.record(db, admin, "user.create", f"Created student {user.name} ({mask_phone(user.phone_normalized)})", "user", user.id)
     db.commit()
     return ops.student_detail(db, user)
 
@@ -454,8 +457,8 @@ def unban_student(user_id: PathId, admin: AdminWriter, db: DB):
 @students.delete("/users/{user_id}", status_code=204)
 def delete_student(user_id: PathId, admin: AdminWriter, db: DB):
     user = _student(db, user_id)
-    ops.record(db, admin, "user.delete", f"Deleted student {user.name} ({user.phone})", "user", user.id,
-               {"name": user.name, "phone": user.phone, "college": user.college})
+    ops.record(db, admin, "user.delete", f"Deleted student {user.name} ({mask_phone(user.phone_normalized)})", "user", user.id,
+               {"name": user.name, "phone": mask_phone(user.phone_normalized), "college": user.college})
     ops.delete_student(db, user)
     db.commit()
 
@@ -512,9 +515,9 @@ numbers = APIRouter(tags=["admin: blocked numbers"])
 def list_blocked(_: CurrentAdmin, db: DB, q: str | None = Query(None, max_length=100)):
     stmt = select(BannedPhone).order_by(BannedPhone.created_at.desc())
     if q and any(c.isdigit() for c in q):
-        stmt = stmt.where(BannedPhone.phone_normalized.like(f"%{normalize_phone(q)[-10:]}%"))
+        stmt = stmt.where(BannedPhone.phone_hash == crypto.phone_hash(q))  # whole numbers only (encrypted)
     rows = list(db.scalars(stmt))
-    accounts = {u.phone_normalized: u for u in db.scalars(select(User).where(User.phone_normalized.in_([r.phone_normalized for r in rows])))}
+    accounts = {u.phone_normalized: u for u in db.scalars(select(User).where(User.phone_hash.in_([r.phone_hash for r in rows])))}
     return [
         s.BannedPhoneOut(
             phone_normalized=r.phone_normalized, phone=r.phone, reason=r.reason, created_by=r.created_by, created_at=r.created_at,
@@ -531,8 +534,9 @@ def block_numbers(payload: s.BannedPhoneIn, admin: AdminWriter, db: DB):
     a blocked number is suspended for as long as the number stays blocked)."""
     result = ops.block_numbers(db, admin, payload.phones, payload.reason)
     if result.added:
-        ops.record(db, admin, "phone.block", f"Blocked {len(result.added)} number(s)", "phone", ",".join(result.added)[:60],
-                   {"numbers": result.added, "reason": payload.reason})
+        masked = [mask_phone(p) for p in result.added]  # the audit log never holds whole numbers
+        ops.record(db, admin, "phone.block", f"Blocked {len(result.added)} number(s)", "phone", ",".join(masked)[:60],
+                   {"numbers": masked, "reason": payload.reason})
     db.commit()
     return result
 
@@ -542,11 +546,11 @@ def unblock_numbers(payload: s.IdsIn, admin: AdminWriter, db: DB):
     """Unblocks several numbers (any format) at once."""
     done, skipped = [], []
     for phone in dict.fromkeys(payload.ids):
-        row = db.get(BannedPhone, normalize_phone(phone))
+        row = db.get(BannedPhone, crypto.phone_hash(phone))
         if row is None:
             skipped.append(phone)
             continue
-        done.append(row.phone_normalized)
+        done.append(mask_phone(row.phone_normalized))
         db.delete(row)
     if done:
         ops.record(db, admin, "phone.bulk_unblock", f"Unblocked {len(done)} number(s)", "phone", ",".join(done)[:60], {"numbers": done})
@@ -556,10 +560,10 @@ def unblock_numbers(payload: s.IdsIn, admin: AdminWriter, db: DB):
 
 @numbers.delete("/banned-phones/{phone}", status_code=204)
 def unblock_number(phone: Annotated[str, PathParam(max_length=32)], admin: AdminWriter, db: DB):
-    row = db.get(BannedPhone, normalize_phone(phone))
+    row = db.get(BannedPhone, crypto.phone_hash(phone))
     if row is None:
         raise not_found("Blocked number")
-    ops.record(db, admin, "phone.unblock", f"Unblocked {row.phone}", "phone", row.phone_normalized)
+    ops.record(db, admin, "phone.unblock", f"Unblocked {mask_phone(row.phone_normalized)}", "phone", row.phone_hash[:16])
     db.delete(row)
     db.commit()
 

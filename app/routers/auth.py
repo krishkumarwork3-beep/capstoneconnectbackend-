@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app import schemas
+from app import crypto, schemas
 from app.config import get_settings
 from app.cookies import (
     clear_sign_in_cookies,
@@ -93,7 +93,7 @@ def signup(payload: schemas.SignupIn, request: Request, response: Response, back
         raise AppError("Enter a valid phone number", 422)
     ensure_good_password(payload.password, payload.phone)
     bans.ensure_number_allowed(db, phone)
-    if db.scalar(select(User.id).where(User.phone_normalized == phone)):
+    if db.scalar(select(User.id).where(User.phone_hash == crypto.phone_hash(phone))):
         raise AppError("An account already exists for this phone number", 409)
 
     github_username = github.username_from(payload.github_url)
@@ -133,7 +133,7 @@ def login(payload: schemas.LoginIn, request: Request, response: Response, db: DB
     account = lockout.student_key(payload.phone)
     limits.check(db, rule, payload.phone, ip)
     lockout.check(db, account)
-    user = db.scalar(select(User).where(User.phone_normalized == normalize_phone(payload.phone)))
+    user = db.scalar(select(User).where(User.phone_hash == crypto.phone_hash(payload.phone)))
     password_ok = verify_password(payload.password, user.password_hash if user else _DUMMY_HASH)
     if user is None or not password_ok:
         lockout.fail(db, account)

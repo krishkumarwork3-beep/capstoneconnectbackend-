@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from app import crypto
 from app.config import get_settings
 from app.errors import AppError
 from app.models import PasswordResetCode, User
@@ -35,7 +36,7 @@ log = logging.getLogger("app.password_reset")
 
 
 def _user_by_phone(db: Session, phone: str) -> User | None:
-    return db.scalar(select(User).where(User.phone_normalized == normalize_phone(phone)))
+    return db.scalar(select(User).where(User.phone_hash == crypto.phone_hash(phone)))
 
 
 def _latest_code(db: Session, user_id: str) -> PasswordResetCode | None:

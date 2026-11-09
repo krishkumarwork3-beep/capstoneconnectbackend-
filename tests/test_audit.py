@@ -4,7 +4,6 @@ password rules, sign-in timing, message history limits, conflicting writes, inpu
 import re
 
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy.exc import IntegrityError
 
 from app.main import app
@@ -75,7 +74,8 @@ EXTRA_WRITES: dict = {
     ("DELETE", "/api/admin/announcements/{announcement_id}"): lambda ids: (f"/api/admin/announcements/{ids['announcement']}", None),
 }
 # Signing yourself in or out (also everywhere: any admin, viewers too, may end their own sessions).
-NOT_DATA_WRITES = {("POST", "/api/admin/auth/login"), ("POST", "/api/admin/auth/logout"), ("POST", "/api/admin/auth/logout-all")}
+NOT_DATA_WRITES = {("POST", "/api/admin/auth/login"), ("POST", "/api/admin/auth/logout"), ("POST", "/api/admin/auth/logout-all"),
+                   ("POST", "/api/admin/auth/refresh")}  # renews the session; changes no data
 
 
 def test_every_admin_route_needs_an_admin(client, as_user):
@@ -109,18 +109,17 @@ def test_read_only_admins_cannot_write_anywhere(admin_client):
 
 
 def _ids(admin_client, as_user):
-    from app.db import SessionLocal
-    from app.models import AdminUser, JoinRequest, Message
     from sqlalchemy import select
+
+    from app.db import SessionLocal
+    from app.models import AdminUser, JoinRequest
 
     lead = as_user(LEAD)
     conv = next(c["id"] for c in lead.get("/api/conversations").json() if c["type"] == "group")
-    for text in ("one", "two"):
-        lead.post(f"/api/conversations/{conv}/messages", json={"text": text})
+    messages = [lead.post(f"/api/conversations/{conv}/messages", json={"text": text}).json()["id"] for text in ("one", "two")]
     viewer = admin_client("viewer")
     with SessionLocal() as db:
         pending = list(db.scalars(select(JoinRequest.id).where(JoinRequest.status == "pending")))
-        messages = list(db.scalars(select(Message.id).where(Message.text.in_(["one", "two"]))))
         viewer_id = db.scalar(select(AdminUser.id).where(AdminUser.role == "viewer"))
     as_user(OTHER).post(f"/api/users/{OTHER}/avatar", files={"avatar": ("me.png", PNG, "image/png")})
     del viewer
@@ -129,9 +128,7 @@ def _ids(admin_client, as_user):
     for target in (LEAD, MEMBER):
         reports.append(as_user(OTHER).post("/api/reports", json={"target_type": "user", "target_id": target, "reason": "spam"}).json()["id"])
     member = as_user(MEMBER)
-    member.post(f"/api/conversations/{conv}/messages", json={"text": "reported"})
-    with SessionLocal() as db:
-        reported = db.scalar(select(Message.id).where(Message.text == "reported"))
+    reported = member.post(f"/api/conversations/{conv}/messages", json={"text": "reported"}).json()["id"]
     reports.append(as_user(LEAD).post("/api/reports", json={"target_type": "message", "target_id": reported, "reason": "spam"}).json()["id"])
     ann = admin_client().post("/api/admin/announcements", json={"text": "Hello"}).json()["id"]
     return {"request": pending[0], "request2": pending[1], "message": messages[0], "message2": messages[1], "viewer_admin": viewer_id,
@@ -139,9 +136,10 @@ def _ids(admin_client, as_user):
 
 
 def test_every_admin_write_is_audited(admin_client, as_user):
+    from sqlalchemy import func, select
+
     from app.db import SessionLocal
     from app.models import AuditLog
-    from sqlalchemy import func, select
 
     admin = admin_client()
     admin.post("/api/admin/banned-phones", json={"phones": ["+91 90000 56565"]})

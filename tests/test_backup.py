@@ -7,6 +7,7 @@ import psycopg
 import pytest
 from sqlalchemy import create_engine, inspect, text
 
+from app import crypto
 from app.db import engine
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -44,7 +45,10 @@ def test_backup_then_restore_into_a_fresh_database(tmp_path, as_user):
     try:
         assert _counts(restored) == _counts(engine)
         with restored.connect() as c:
-            assert c.scalar(text("select count(*) from messages where text = 'backed up'")) == 1
+            # Messages are encrypted at rest: the dump holds ciphertext, which the same keys decrypt.
+            rows = c.execute(text("select id, text from messages where text <> ''")).all()
+            assert rows and all(t.startswith("enc:") for _, t in rows)
+            assert sum(crypto.decrypt(t, "messages", "text", i) == "backed up" for i, t in rows) == 1
     finally:
         restored.dispose()
 

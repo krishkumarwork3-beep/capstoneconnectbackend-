@@ -10,7 +10,7 @@ HTTPS, a real deployment): see `startup_check`.
 import logging
 import sys
 
-from app.config import DEV_SECRET_KEY, Settings, get_settings
+from app.config import DEV_BLIND_INDEX_KEY, DEV_FIELD_ENCRYPTION_KEYS, DEV_SECRET_KEY, Settings, get_settings
 
 log = logging.getLogger("app.config")
 
@@ -25,6 +25,7 @@ def problems(settings: Settings) -> list[tuple[str, str]]:
         found.append(("fatal", "SECRET_KEY is the development default: anyone could forge sessions"))
     elif len(set(settings.secret_key)) < 10:
         found.append(("warning", "SECRET_KEY looks weak: use 32+ random characters"))
+    found += _key_problems(settings)
     if settings.allow_dev_code:
         found.append(("fatal", "ALLOW_DEV_CODE=true returns password-reset codes to whoever asks"))
     if settings.demo_login:
@@ -45,6 +46,33 @@ def problems(settings: Settings) -> list[tuple[str, str]]:
         found.append(("warning", "PUBLIC_BASE_URL is http:// while cookies are Secure: file links would be mixed content"))
     if any(o.startswith("http://") and "localhost" not in o and "127.0.0.1" not in o for o in settings.cors_origins):
         found.append(("warning", "CORS_ORIGINS includes a plain-HTTP origin"))
+    return found
+
+
+def _key_problems(settings: Settings) -> list[tuple[str, str]]:
+    """The field-encryption and blind-index keys: present, well formed, not the development
+    defaults, and not the same as each other or the JWT secret."""
+    from app import crypto
+
+    found: list[tuple[str, str]] = []
+    try:
+        _, field_keys = crypto._parse_keys(settings.field_encryption_keys)
+    except crypto.FieldCryptoError as exc:
+        return [("fatal", f"FIELD_ENCRYPTION_KEYS: {exc}")]
+    try:
+        blind = crypto._blind_key(settings.blind_index_key)
+    except crypto.FieldCryptoError as exc:
+        return [("fatal", f"BLIND_INDEX_KEY: {exc}")]
+    dev_field = set(crypto._parse_keys(DEV_FIELD_ENCRYPTION_KEYS)[1].values())
+    if set(field_keys.values()) & dev_field:
+        found.append(("fatal", "FIELD_ENCRYPTION_KEYS includes the development key: phone numbers and messages are readable by anyone with the repo"))
+    if settings.blind_index_key.strip() == DEV_BLIND_INDEX_KEY:
+        found.append(("fatal", "BLIND_INDEX_KEY is the development default"))
+    secret = settings.secret_key.encode()
+    if blind in field_keys.values() or any(k == secret or k in secret for k in [blind, *field_keys.values()]):
+        found.append(("fatal", "BLIND_INDEX_KEY, FIELD_ENCRYPTION_KEYS and SECRET_KEY must all be different keys"))
+    if settings.blind_index_key.strip() in (settings.secret_key, *settings.field_encryption_keys.split(",")):
+        found.append(("fatal", "BLIND_INDEX_KEY, FIELD_ENCRYPTION_KEYS and SECRET_KEY must all be different keys"))
     return found
 
 

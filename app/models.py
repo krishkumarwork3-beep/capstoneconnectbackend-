@@ -25,6 +25,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
+from app.encrypted import EncryptedField
 
 
 def utcnow() -> datetime:
@@ -51,8 +52,13 @@ class User(Base):
     passing_year: Mapped[int] = mapped_column(Integer)
     # As typed (shown back to the user) and normalised to digits with the country code (unique,
     # used for login and password reset).
-    phone: Mapped[str] = mapped_column(String(32))
-    phone_normalized: Mapped[str] = mapped_column(String(20), unique=True)
+    # Encrypted at rest (AES-256-GCM, app.encrypted): as typed, and normalized for SMS. Found and
+    # kept unique by `phone_hash`, an HMAC blind index of the normalized number.
+    _phone_ct: Mapped[str] = mapped_column("phone", Text)
+    _phone_normalized_ct: Mapped[str] = mapped_column("phone_normalized", Text)
+    phone_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    phone = EncryptedField("_phone_ct", "users", "phone")
+    phone_normalized = EncryptedField("_phone_normalized_ct", "users", "phone_normalized", blind="phone_hash")
     password_hash: Mapped[str] = mapped_column(String(100))
 
     bio: Mapped[str] = mapped_column(Text, default="")
@@ -161,8 +167,11 @@ class Report(Base):
     target_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     conversation_id: Mapped[str | None] = mapped_column(String(40))
     reason: Mapped[str] = mapped_column(String(20))
-    details: Mapped[str] = mapped_column(Text, default="")
-    snapshot: Mapped[str] = mapped_column(Text, default="")
+    # What the reporter wrote and what was reported (a message's text): encrypted at rest.
+    _details_ct: Mapped[str] = mapped_column("details", Text, default="")
+    _snapshot_ct: Mapped[str] = mapped_column("snapshot", Text, default="")
+    details = EncryptedField("_details_ct", "reports", "details")
+    snapshot = EncryptedField("_snapshot_ct", "reports", "snapshot")
     status: Mapped[str] = mapped_column(String(12), default="open")  # open | reviewed | dismissed | actioned
     handled_by: Mapped[str | None] = mapped_column(String(200))
     handled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -292,7 +301,8 @@ class Conversation(Base):
     type: Mapped[str] = mapped_column(String(10))  # "direct" | "group"
     # Group chats belong to their group and are deleted with it.
     group_id: Mapped[str | None] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), unique=True)
-    last_message_text: Mapped[str | None] = mapped_column(Text)
+    _last_message_text_ct: Mapped[str | None] = mapped_column("last_message_text", Text)
+    last_message_text = EncryptedField("_last_message_text_ct", "conversations", "last_message_text")  # encrypted at rest
     last_message_sender: Mapped[str | None] = mapped_column(String(120))
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = _now_column()
@@ -334,7 +344,8 @@ class Message(Base):
     conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"))
     sender_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     sender_name: Mapped[str] = mapped_column(String(120))
-    text: Mapped[str] = mapped_column(Text, default="")
+    _text_ct: Mapped[str] = mapped_column("text", Text, default="")
+    text = EncryptedField("_text_ct", "messages", "text")  # encrypted at rest (AES-256-GCM)
     attachment_name: Mapped[str | None] = mapped_column(String(255))
     attachment_url: Mapped[str | None] = mapped_column(String(500))
     attachment_size: Mapped[int | None] = mapped_column(Integer)
@@ -382,8 +393,13 @@ class BannedPhone(Base):
 
     __tablename__ = "banned_phones"
 
-    phone_normalized: Mapped[str] = mapped_column(String(20), primary_key=True)
-    phone: Mapped[str] = mapped_column(String(32))
+    # The blind index of the number is the key; the number itself is encrypted (row id = the hash).
+    phone_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    _phone_normalized_ct: Mapped[str] = mapped_column("phone_normalized", Text)
+    _phone_ct: Mapped[str] = mapped_column("phone", Text)
+    phone_normalized = EncryptedField("_phone_normalized_ct", "banned_phones", "phone_normalized", id_attr="phone_hash",
+                                      blind="phone_hash")
+    phone = EncryptedField("_phone_ct", "banned_phones", "phone", id_attr="phone_hash")
     reason: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[str | None] = mapped_column(String(200))
     created_at: Mapped[datetime] = _now_column()

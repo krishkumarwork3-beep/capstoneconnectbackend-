@@ -3,6 +3,7 @@
     uv run python -m app.admin_cli create you@example.com "Your Name"      # asks for a password
     uv run python -m app.admin_cli password you@example.com                # sets a new password
     uv run python -m app.admin_cli list
+    uv run python -m app.admin_cli rotate-keys   # re-encrypts fields with the active key (app.crypto)
 """
 
 import argparse
@@ -39,7 +40,19 @@ def main() -> None:
     reset = sub.add_parser("password")
     reset.add_argument("email")
     sub.add_parser("list")
+    sub.add_parser("rotate-keys", help="re-encrypt every encrypted field with the first FIELD_ENCRYPTION_KEYS key")
     args = parser.parse_args()
+
+    if args.command == "rotate-keys":
+        from app.services.key_rotation import rotate
+
+        with SessionLocal() as db:
+            changed = rotate(db)
+            db.add(AuditLog(id=new_id("aud"), admin_email="command line", action="security.rotate_keys", target_type="system",
+                            target_id="field_encryption", summary=f"Re-encrypted fields with the active key: {changed}"))
+            db.commit()
+        print(f"Re-encrypted: {changed}")
+        return
 
     with SessionLocal() as db:
         if args.command == "list":

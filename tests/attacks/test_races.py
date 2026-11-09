@@ -6,6 +6,7 @@ import threading
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
+from app import crypto
 from app.db import SessionLocal
 from app.main import app
 from app.models import GroupMember, JoinRequest, Message, Report, User
@@ -98,11 +99,11 @@ def test_the_same_message_sent_twice_is_stored_once():
     results = _at_once([lambda c=c: c.post("/api/conversations/conv_2/messages", json={"text": "only once", "client_id": "c-123"})
                         for c in senders])
     assert set(results) <= {200, 201}, results
-    assert _count(select(Message).where(Message.conversation_id == "conv_2", Message.text == "only once")) == 1
+    assert _count(select(Message).where(Message.conversation_id == "conv_2", Message.client_id == "c-123")) == 1
     # And a later retry returns the same message.
     again = senders[0].post("/api/conversations/conv_2/messages", json={"text": "only once", "client_id": "c-123"})
     assert again.status_code in (200, 201)
-    assert _count(select(Message).where(Message.conversation_id == "conv_2", Message.text == "only once")) == 1
+    assert _count(select(Message).where(Message.conversation_id == "conv_2", Message.client_id == "c-123")) == 1
     # Another sender may use the same client_id: it is per sender.
     other = _client("usr_2").post("/api/conversations/conv_2/messages", json={"text": "only once", "client_id": "c-123"})
     assert other.status_code == 201
@@ -136,7 +137,7 @@ def test_signing_up_twice_at_once():
     results = _at_once([lambda: TestClient(app).post("/api/auth/signup", json=body) for _ in range(N)])
     assert results.count(201) == 1 and set(results) <= {201, 409, 429}, results
     with SessionLocal() as db:
-        assert db.scalar(select(func.count()).select_from(User).where(User.phone_normalized == "919000033333")) == 1
+        assert db.scalar(select(func.count()).select_from(User).where(User.phone_hash == crypto.phone_hash("919000033333"))) == 1
 
 
 def test_logging_in_many_times_at_once_counts_every_failure():

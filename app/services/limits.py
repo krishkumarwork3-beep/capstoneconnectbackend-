@@ -15,6 +15,7 @@ from fastapi import Request
 from sqlalchemy import delete, text
 from sqlalchemy.orm import Session
 
+from app import crypto
 from app.config import get_settings
 from app.errors import AppError
 from app.models import RateLimit
@@ -60,7 +61,8 @@ def _keys(rule_: Rule, phone: str | None, ip: str) -> list[tuple[str, int]]:
     keys = [(f"{rule_.action}:ip:{ip}", rule_.per_ip)]
     digits = normalize_phone(phone) if phone else ""
     if digits:
-        keys.append((f"{rule_.action}:phone:{digits}", rule_.per_phone))
+        # Keyed by the number's blind index: the limits table never holds phone numbers.
+        keys.append((f"{rule_.action}:phone:{crypto.blind_index(digits)}", rule_.per_phone))
     return keys
 
 
@@ -99,7 +101,7 @@ def hit(db: Session, rule_: Rule, phone: str | None, ip: str) -> None:
 
 def reset(db: Session, rule_: Rule, phone: str) -> None:
     """A successful sign-in clears the phone number's count (the IP's count of failures stays)."""
-    db.execute(delete(RateLimit).where(RateLimit.key == f"{rule_.action}:phone:{normalize_phone(phone)}"))
+    db.execute(delete(RateLimit).where(RateLimit.key == f"{rule_.action}:phone:{crypto.blind_index(normalize_phone(phone))}"))
     db.commit()
 
 

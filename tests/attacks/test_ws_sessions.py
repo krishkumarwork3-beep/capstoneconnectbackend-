@@ -201,4 +201,5 @@ def test_no_graphql_server_exists():
         modules |= {n.module or "" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
         assert not any("graphql" in m for m in modules), path.name
     runtime = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]["dependencies"]
-    assert not [d for d in runtime if "graph" in d.lower()]
+    graphql_libs = ("graphql", "strawberry", "ariadne", "graphene", "tartiflette")
+    assert not [d for d in runtime if any(lib in d.lower() for lib in graphql_libs)]

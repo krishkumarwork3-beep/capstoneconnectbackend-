@@ -4,10 +4,11 @@ phone-number privacy, private uploads, and the admin moderation tools that came 
 import pytest
 from fastapi.testclient import TestClient
 
+from app import crypto
 from app.check_config import problems, startup_check
 from app.config import DEV_SECRET_KEY, Settings, get_settings
 from app.main import app
-from tests.conftest import all_items, PASSWORD, PHONES
+from tests.conftest import PASSWORD, PHONES, all_items
 
 LEAD, MEMBER, LOOKING, OTHER = "usr_1", "usr_9", "usr_6", "usr_8"
 PNG = __import__("tests.conftest", fromlist=["REAL_PNG"]).REAL_PNG  # a real 8x8 image (uploads are re-encoded)
@@ -37,7 +38,9 @@ def test_unsafe_settings_stop_a_secure_deployment():
         startup_check(Settings(cookie_secure=True, secret_key="x" * 8 + "abcdefghijklmnopqrstuvwxyz0123456789", allow_dev_code=True))
     good = Settings(cookie_secure=True, secret_key="Q7v-2kLp9xZr4TbW8mNc1yHs6dFg3jEa5uRo0iVq", demo_login=False,
                     allow_dev_code=False, sms_provider="twilio", twilio_account_sid="AC-test", twilio_auth_token="t",
-                    twilio_from_number="+15550000000", admin_password="", public_base_url="https://api.example.com")
+                    twilio_from_number="+15550000000", admin_password="", public_base_url="https://api.example.com",
+                    field_encryption_keys="p1:MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+                    blind_index_key="ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA=")
     startup_check(good)
     assert problems(good) == []
     # On a laptop (plain HTTP) the same settings only warn.
@@ -48,8 +51,10 @@ def test_check_config_lists_every_problem():
     found = dict((text.split(" ")[0], severity) for severity, text in problems(
         Settings(secret_key=DEV_SECRET_KEY, demo_login=True, cookie_secure=False, sms_provider="console",
                  admin_password="admin123", allow_dev_code=True)))
+    # The development field-encryption and blind-index keys are fatal too (the default settings use them).
     assert found == {"SECRET_KEY": "fatal", "ALLOW_DEV_CODE=true": "fatal", "DEMO_LOGIN=true": "fatal",
-                     "COOKIE_SECURE=false:": "warning", "SMS_PROVIDER=console:": "warning", "ADMIN_PASSWORD": "warning"}
+                     "COOKIE_SECURE=false:": "warning", "SMS_PROVIDER=console:": "warning", "ADMIN_PASSWORD": "warning",
+                     "FIELD_ENCRYPTION_KEYS": "fatal", "BLIND_INDEX_KEY": "fatal"}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -111,7 +116,8 @@ def test_counters_are_shared_through_the_database(client):
 
     client.post("/api/auth/login", json={"phone": PHONES["usr_8"], "password": "wrong-password"})
     with SessionLocal() as db:
-        row = db.get(RateLimit, "login:phone:919278901234")
+        # Keyed by the number's blind index: the table never holds the number itself.
+        row = db.get(RateLimit, f"login:phone:{crypto.blind_index('919278901234')}")
         assert row is not None and row.count == 1
 
 

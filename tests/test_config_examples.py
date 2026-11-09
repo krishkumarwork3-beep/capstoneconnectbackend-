@@ -40,6 +40,9 @@ def test_production_example_passes_check_config_once_filled_in():
     values = {k: v for k, v in _keys(ROOT / ".env.production.example").items() if k not in INFRA}
     values.update({
         "SECRET_KEY": "Q7v-2kLp9xZr4TbW8mNc1yHs6dFg3jEa5uRo0iVq",
+        # Filled in like SECRET_KEY: two different 32-byte keys (placeholders in the example).
+        "FIELD_ENCRYPTION_KEYS": "k1:MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        "BLIND_INDEX_KEY": "ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA=",
         "TWILIO_ACCOUNT_SID": "AC-placeholder", "TWILIO_AUTH_TOKEN": "placeholder", "TWILIO_FROM_NUMBER": "+15550000000",
     })
     # As the environment loader does: JSON for lists.

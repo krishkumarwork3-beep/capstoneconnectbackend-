@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app import admin_schemas as s
 from app import realtime
+from app import crypto
 from app.services import uploads
 from app.config import get_settings
 from app.db import SessionLocal
@@ -135,7 +136,8 @@ def blocked_numbers(db: Session, phones: Iterable[str]) -> set[str]:
     phones = list(set(phones))
     if not phones:
         return set()
-    return set(db.scalars(select(BannedPhone.phone_normalized).where(BannedPhone.phone_normalized.in_(phones))))
+    by_hash = {crypto.phone_hash(p): p for p in phones}
+    return {by_hash[h] for h in db.scalars(select(BannedPhone.phone_hash).where(BannedPhone.phone_hash.in_(list(by_hash))))}
 
 
 def student_row(user: User, blocked: set[str]) -> s.StudentRow:
@@ -183,7 +185,7 @@ def student_detail(db: Session, user: User) -> s.StudentDetail:
 def check_phone_free(db: Session, phone_normalized: str, except_user: str | None = None) -> None:
     if len(phone_normalized) < 10:
         raise AppError("Enter a valid phone number", 422)
-    other = db.scalar(select(User.id).where(User.phone_normalized == phone_normalized))
+    other = db.scalar(select(User.id).where(User.phone_hash == crypto.phone_hash(phone_normalized)))
     if other and other != except_user:
         raise AppError("Another account already uses this phone number", 409)
 
@@ -214,14 +216,14 @@ def block_numbers(db: Session, admin: AdminUser, phones: Iterable[str], reason: 
         normalized = normalize_phone(raw)
         if len(normalized) < 10:
             invalid.append(raw)
-        elif db.get(BannedPhone, normalized) or normalized in added:
+        elif db.get(BannedPhone, crypto.phone_hash(normalized)) or normalized in added:
             already.append(raw)
         else:
             db.add(BannedPhone(phone_normalized=normalized, phone=raw, reason=reason.strip() or None, created_by=admin.email))
             added.append(normalized)
     db.flush()
     if added:
-        end_sessions(db, db.scalars(select(User.id).where(User.phone_normalized.in_(added))), close_code=1008)
+        end_sessions(db, db.scalars(select(User.id).where(User.phone_hash.in_([crypto.phone_hash(p) for p in added]))), close_code=1008)
     return s.BannedPhoneAdded(added=added, already=already, invalid=invalid)
 
 

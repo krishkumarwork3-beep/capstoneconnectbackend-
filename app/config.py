@@ -12,6 +12,10 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # The SECRET_KEY default: fine on a laptop, never on a public server.
 DEV_SECRET_KEY = "dev-only-change-me-dev-only-change-me"
+# Development-only field-encryption keys (32 bytes each, base64). app.check_config refuses them in
+# production; generate real ones with:  python -c "import os,base64;print(base64.b64encode(os.urandom(32)).decode())"
+DEV_FIELD_ENCRYPTION_KEYS = "dev1:y+TO35DQIlU7gl3RqkT4+Qq9FEdwlu0WLPawkK17s6M="
+DEV_BLIND_INDEX_KEY = "o7FB1EP3uGssTRGMxWYs2INd6w5djjG9gRSUZ4V6H5E="
 
 
 class Settings(BaseSettings):
@@ -27,6 +31,12 @@ class Settings(BaseSettings):
     # A sign-in lasts SESSION_DAYS at most (absolute; students), renewed by a rotating refresh
     # token; the access token in the session cookie lives ACCESS_TOKEN_MINUTES (at most 15).
     session_days: int = Field(default=14, ge=1, le=30)
+    # AES-256-GCM keys for personal fields at rest (app.crypto): "<id>:<base64 32 bytes>", comma-
+    # separated, the first one encrypts (rotate: put the new key first, run
+    # `python -m app.admin_cli rotate-keys`, then drop the old one). BLIND_INDEX_KEY (32 bytes,
+    # base64, separate from both) makes phone numbers searchable by exact match without storing them.
+    field_encryption_keys: str = DEV_FIELD_ENCRYPTION_KEYS
+    blind_index_key: str = DEV_BLIND_INDEX_KEY
     access_token_minutes: int = Field(default=15, ge=1, le=15)
     refresh_cookie_name: str = "cc_refresh"
     admin_refresh_cookie_name: str = "cc_admin_refresh"

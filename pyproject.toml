@@ -18,6 +18,8 @@ dependencies = [
     "python-multipart==0.0.33",
     "boto3==1.43.123",
     "pillow==13.0.0",
+    # AES-256-GCM field encryption and HMAC blind indexes (app.crypto).
+    "cryptography==50.0.2",
 ]
 
 [dependency-groups]

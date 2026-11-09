@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import delete, text
 from sqlalchemy.orm import Session
 
+from app import crypto
 from app.errors import AppError
 from app.models import LoginLockout
 from app.security import normalize_phone
@@ -32,7 +33,7 @@ _FAIL = text(
 
 
 def student_key(phone: str) -> str:
-    return f"student:{normalize_phone(phone)}"
+    return f"student:{crypto.phone_hash(phone)}"  # the blind index, not the number
 
 
 def admin_key(email: str) -> str:

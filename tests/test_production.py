@@ -16,10 +16,15 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app.config import DEV_SECRET_KEY, Settings, get_settings
+from app.config import (
+    DEV_BLIND_INDEX_KEY,
+    DEV_FIELD_ENCRYPTION_KEYS,
+    DEV_SECRET_KEY,
+    Settings,
+    get_settings,
+)
 from app.main import app
-from tests.conftest import PASSWORD, PHONES
-from tests.conftest import ws_connect
+from tests.conftest import PASSWORD, PHONES, ws_connect
 
 ROOT = Path(__file__).resolve().parent.parent
 OTHER = "usr_8"
@@ -164,7 +169,10 @@ def test_trusted_proxy_setting_inside_the_app(monkeypatch):
 
 SAFE = dict(COOKIE_SECURE="true", SECRET_KEY=STRONG_KEY, DEMO_LOGIN="false", ALLOW_DEV_CODE="false", SMS_PROVIDER="twilio",
             TWILIO_ACCOUNT_SID="AC-test", TWILIO_AUTH_TOKEN="t", TWILIO_FROM_NUMBER="+15550000000",
-            CORS_ORIGINS='["https://app.example.com"]', PUBLIC_BASE_URL="https://api.example.com", ADMIN_PASSWORD="")
+            CORS_ORIGINS='["https://app.example.com"]', PUBLIC_BASE_URL="https://api.example.com", ADMIN_PASSWORD="",
+            # Production needs its own field-encryption and blind-index keys (never the development ones).
+            FIELD_ENCRYPTION_KEYS="p1:MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+            BLIND_INDEX_KEY="ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA=")
 
 
 def _check_config(**env) -> subprocess.CompletedProcess:
@@ -181,6 +189,8 @@ def test_check_config_exit_codes():
     {"SECRET_KEY": DEV_SECRET_KEY},
     {"DEMO_LOGIN": "true"},
     {"ALLOW_DEV_CODE": "true"},
+    {"FIELD_ENCRYPTION_KEYS": DEV_FIELD_ENCRYPTION_KEYS},
+    {"BLIND_INDEX_KEY": DEV_BLIND_INDEX_KEY},
 ])
 def test_the_api_refuses_to_start_unsafe_on_https(override):
     server = Server(**{**SAFE, **override})
