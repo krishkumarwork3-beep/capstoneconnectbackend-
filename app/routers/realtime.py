@@ -21,13 +21,15 @@ Client → server:
 
 Close codes: 4401 not signed in (or the session ended), 4403 origin not allowed, 1003 a binary
 frame, 1009 a frame over 2 KB, 1008 five frames that aren't one of the above (strict schema), too many
-frames (over 30 in 10 seconds) or too many sockets (10 per account, WS_MAX_SOCKETS in all),
+frames (over 30 in 10 seconds on one socket, 60 across the account's sockets) or too many sockets (10 per account, WS_MAX_SOCKETS in all),
 4408 nothing heard for 90 seconds (the client pings every 25).
 """
 
 import asyncio
 import json
 import logging
+import secrets
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -62,6 +64,12 @@ MAX_BAD_FRAMES = 5
 # Closed when nothing at all arrives for this long (a live client pings every ~25 s).
 IDLE_SECONDS = 90
 MAX_SOCKETS_PER_USER = 10
+# Per account, across all its sockets in this process: at most this many frames in RATE_WINDOW
+# (10 sockets x 30 would otherwise allow 300). Over it, the socket that sent the frame closes (1008).
+ACCOUNT_RATE_FRAMES = 60
+# The session row is re-read this often even on a silent socket (and on every acting frame), so a
+# session that expired or went idle closes the socket (4401) without waiting for a push.
+SESSION_RECHECK_SECONDS = 60.0
 # The first frame must be {"type": "auth", "ticket": ...} within this long (see POST /realtime/ticket).
 AUTH_SECONDS = 5
 # How long a ticket from POST /realtime/ticket can be used (once).
@@ -296,6 +304,26 @@ def _typing(user_id: str, conversation_id: str, typing: bool, send: bool = True)
     return "ok"
 
 
+_account_lock = threading.Lock()
+_account_frames: dict[str, list[float]] = {}
+
+
+def _account_over(user_id: str, now: float) -> bool:
+    """One more frame on the account's budget across all its sockets; True when over it."""
+    with _account_lock:
+        recent = [t for t in _account_frames.get(user_id, ()) if now - t < RATE_WINDOW]
+        recent.append(now)
+        _account_frames[user_id] = recent
+        return len(recent) > ACCOUNT_RATE_FRAMES
+
+
+def _request_id(ws: WebSocket) -> str:
+    """For the log lines about this socket: the proxy's X-Request-ID if it is sane, else a new one.
+    Never the cookie, the ticket or a frame's body."""
+    rid = ws.headers.get("x-request-id", "")
+    return rid if rid.isalnum() and len(rid) <= 64 else secrets.token_hex(8)
+
+
 def _origin_allowed(ws: WebSocket) -> bool:
     # Browsers always send Origin on a WebSocket; refusing others (exact match: no "null", no
     # look-alikes) stops a foreign site from opening a socket with the visitor's cookie. Clients
@@ -385,11 +413,16 @@ async def _heartbeat_loop(ws: WebSocket, conn: "realtime.Connection", state: _St
     """Sends a numbered heartbeat every HEARTBEAT_EVERY seconds and closes the socket (4408) if
     one goes unanswered for HEARTBEAT_GRACE: a client that is connected but no longer working
     (frozen tab, stuck reader) is let go, even if it still sends other frames."""
-    tick = max(0.05, min(HEARTBEAT_EVERY, HEARTBEAT_GRACE) / 3)
-    sent_at = time.monotonic()
+    tick = max(0.05, min(HEARTBEAT_EVERY, HEARTBEAT_GRACE, SESSION_RECHECK_SECONDS) / 3)
+    sent_at = checked_at = time.monotonic()
     while True:
         await asyncio.sleep(tick)
         now = time.monotonic()
+        if now - checked_at >= SESSION_RECHECK_SECONDS:
+            checked_at = now
+            if await run_in_threadpool(_session_user, state.token) is None:
+                conn.close(4401, "Your session ended")
+                return
         if state.awaiting is not None:
             if now - state.awaiting_since > HEARTBEAT_GRACE:
                 conn.close(4408, "No answer to the heartbeat")
@@ -440,17 +473,21 @@ def socket_ticket(request: Request, db: DB, user: CurrentUser):
 
 @router.websocket("/ws")
 async def socket(ws: WebSocket):
+    rid = _request_id(ws)
     if not _origin_allowed(ws):
+        log.warning("socket refused (4403 origin not allowed) request_id=%s", rid)
         await ws.close(code=4403)
         return
     token = _token(ws)
     who = await run_in_threadpool(_session_user, token)
     await ws.accept()
     if who is None:
+        log.info("socket refused (4401 no session) request_id=%s", rid)
         await ws.close(code=4401, reason="Sign in to continue")
         return
     user_id, name, session_id = who
     if not await _handshake(ws, user_id, session_id):
+        log.info("socket refused (4401 no valid ticket first) request_id=%s user=%s", rid, user_id)
         await ws.close(code=4401, reason="Sign in to continue")
         return
     await run_in_threadpool(realtime.ensure_listener)
@@ -480,7 +517,8 @@ async def socket(ws: WebSocket):
             now = time.monotonic()
             recent = [t for t in recent if now - t < RATE_WINDOW]
             recent.append(now)
-            if len(recent) > RATE_FRAMES:
+            if len(recent) > RATE_FRAMES or _account_over(user_id, now):
+                log.info("socket closed (1008 rate limit) request_id=%s user=%s", rid, user_id)
                 await ws.close(code=1008, reason="Too many messages")
                 break
             raw = message.get("text")
@@ -493,6 +531,7 @@ async def socket(ws: WebSocket):
             try:
                 frame = parse_frame(raw)
             except (ValueError, ValidationError, RecursionError):
+                log.info("frame refused (invalid) request_id=%s user=%s", rid, user_id)
                 if await _bad_frame(ws, state, conn):
                     break
                 continue
@@ -517,6 +556,8 @@ async def socket(ws: WebSocket):
         pump.cancel()
         beats.cancel()
         if realtime.hub.remove(conn):
+            with _account_lock:
+                _account_frames.pop(user_id, None)
             # Whoever they were typing to should not see "typing…" linger.
             for conversation_id, (typing, _) in state.typing_sent.items():
                 if typing:

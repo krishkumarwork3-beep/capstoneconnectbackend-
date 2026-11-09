@@ -71,6 +71,7 @@ def test_fuzz_every_frame_type_and_field_as_a_student(as_user, monkeypatch):
     # The per-connection limits would (rightly) close the socket long before the corpus is through.
     monkeypatch.setattr(ws_routes, "RATE_FRAMES", 100_000)
     monkeypatch.setattr(ws_routes, "MAX_BAD_FRAMES", 100_000)
+    monkeypatch.setattr(ws_routes, "ACCOUNT_RATE_FRAMES", 100_000)
     attacker, victim = as_user(ATTACKER), as_user(VICTIM)
     corpus = list(_frames())
     assert len(corpus) > 500

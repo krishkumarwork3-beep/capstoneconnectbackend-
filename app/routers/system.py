@@ -3,7 +3,7 @@
 import logging
 import os
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
@@ -13,7 +13,7 @@ from app.deps import DB, CurrentUser, OptionalUser
 from app.config import get_settings
 from app.errors import AppError
 from app.models import utcnow
-from app.services import chat, github
+from app.services import chat, github, stats
 from app.services import groups as rules
 
 router = APIRouter(tags=["system"])
@@ -40,6 +40,15 @@ def presence(db: DB, user: CurrentUser):
     db.commit()
 
 
+@router.get("/stats/signups", response_model=schemas.SignupTotalOut)
+def signup_total(request: Request, response: Response, db: DB):
+    """Public, aggregate only: how many students have signed up (no names, ids or dates).
+    Cached for 60 s and limited per address."""
+    write_limits.per_account(db, "public_stats", f"ip:{write_limits.client_ip(request)}", get_settings().public_stats_limit_per_ip)
+    response.headers["Cache-Control"] = "public, max-age=60"
+    return {"total": stats.cached_signup_total(db)}
+
+
 @router.get("/github/verify", response_model=schemas.GitHubLookupOut)
 async def verify_github(request: Request, db: DB, user: OptionalUser, username: str = Query(min_length=1, max_length=100)):
     """Public (used during sign-up): does this GitHub user exist, and their all-time contributions."""
@@ -55,7 +64,7 @@ async def verify_github(request: Request, db: DB, user: OptionalUser, username: 
     if result is None:
         return {"valid": False, "username": name}
     profile, total = result
-    return {"valid": True, "username": github._login(profile, name), "contribution_count": total}
+    return {"valid": True, "username": github._login(profile, name), "contribution_count": total.count}
 
 
 @router.get("/health")

@@ -1,7 +1,7 @@
 """Students: the Discover board, profiles, profile edits, uploads and GitHub activity."""
 
 import asyncio
-from datetime import UTC, datetime
+import logging
 from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, File, Query, UploadFile
@@ -17,6 +17,7 @@ from app.models import GroupMember, User
 from app.serializers import request_out, user_out
 from app.services import github, groups, uploads
 
+log = logging.getLogger(__name__)
 router = APIRouter(prefix="/users", tags=["users"])
 
 IN_GROUP_WORDS = "in a group grouped"
@@ -88,8 +89,10 @@ def list_users(
 
 
 @router.get("/{user_id}", response_model=schemas.UserOut)
-def get_user(user_id: PathId, db: DB, me: CurrentUser):
+def get_user(user_id: PathId, db: DB, me: CurrentUser, background: BackgroundTasks):
     user = _get_user(db, user_id)
+    if user.github_verified and github.is_stale(user.github_synced_at):
+        background.add_task(github.sync_user, user.id, True)  # the next view shows the fresh total
     return user_out(user, user.id in groups.phone_visible_ids(db, me, [user.id]))
 
 
@@ -143,8 +146,7 @@ def _apply_github(user: User, url: str | None, wants_verified: bool) -> None:
     profile, total = result
     user.github_url = f"https://github.com/{github._login(profile, username)}"
     user.github_verified = True
-    user.github_contribution_count = total
-    user.github_synced_at = datetime.now(UTC)
+    github.apply_total(user, total)
 
 
 @router.post("/{user_id}/avatar", response_model=schemas.AvatarOut)
@@ -179,7 +181,15 @@ def github_activity(user_id: PathId, db: DB, _: CurrentUser, background: Backgro
     if username is None:
         raise AppError("This student has not added a GitHub username", 404)
     if github.is_stale(user.github_synced_at):
-        background.add_task(github.sync_user, user.id, True)
+        if user.github_verified:
+            # One calendar request (not the rate-limited API): this answer already has the fresh total.
+            try:
+                github.apply_total(user, asyncio.run(github.refresh_count(username)))
+                db.commit()
+            except github.GitHubUnavailable as exc:
+                log.warning("GitHub total for %s not refreshed: %s", user.id, exc)
+        else:
+            background.add_task(github.sync_user, user.id, True)
     try:
         return asyncio.run(github.activity(username, user.github_contribution_count or 0))
     except github.GitHubUnavailable as exc:

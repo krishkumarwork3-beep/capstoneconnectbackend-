@@ -1,13 +1,15 @@
-"""GitHub: username checks, all-time contribution totals and the profile activity summary.
+"""GitHub: username checks, the contribution total and the profile activity summary.
 
-All-time contributions = the contribution calendar's total for every year since the account was
-created (GitHub only reports them a year at a time).
-- With GITHUB_TOKEN: one GraphQL query, a `contributionsCollection` per year.
-- Without a token: the public calendar page for each year ("1,234 contributions in 2023"), which
-  is what github.com shows on the profile. Same numbers; slower and rate-limited by IP.
+The total is GitHub's own profile headline: "N contributions in the last year" (the rolling
+year ending today, private contributions included when the user shares them).
+- With GITHUB_TOKEN: GraphQL `contributionsCollection` with no from/to (GitHub's default window is
+  that same rolling year; windows over one year are refused by GitHub, so none is asked for).
+- Without a token: the public calendar page (github.com/users/<login>/contributions, no dates),
+  whose heading is that headline. Not api.github.com, so the API's 60/hour limit can't starve it.
 
-Results are cached on the user (`github_contribution_count`, `github_synced_at`); a GitHub outage
-never breaks a page, the cached total is used instead.
+Results are cached on the user (`github_contribution_count`, `github_synced_at`) and refreshed
+when older than GITHUB_REFRESH_HOURS. A failed lookup never touches the cached total, and an
+incomplete one (no headline found, only day cells added up) never lowers it.
 """
 
 import asyncio
@@ -17,6 +19,7 @@ import re
 import socket
 from collections import Counter
 from datetime import UTC, datetime, timedelta
+from typing import NamedTuple
 
 import httpx
 
@@ -28,7 +31,7 @@ API = "https://api.github.com"
 USERNAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$")
 # Applied to a page from another host: every repetition is bounded and starts only at the start of
 # a number, so the time is linear in the page size (no ReDoS from a hostile or huge response).
-YEAR_TOTAL = re.compile(r"(?<![\d,])(\d[\d,]{0,14})\s{1,20}contributions?\s{1,20}in\s{1,20}(\d{4})")
+YEAR_TOTAL = re.compile(r"(?<![\d,])(\d[\d,]{0,14})\s{1,20}contributions?\s{1,20}in\s{1,20}(\d{4}|the\s{1,20}last\s{1,20}year)")
 DAY_COUNT = re.compile(r"(?<!\d)(\d{1,7}) contributions? on")
 
 # Colours for the language bar (GitHub's linguist colours for the common ones).
@@ -170,17 +173,15 @@ async def fetch_profile(client: httpx.AsyncClient, username: str) -> dict | None
     return profile
 
 
-async def _all_time_graphql(client: httpx.AsyncClient, username: str, years: list[int]) -> int:
-    parts = [
-        f'y{year}: contributionsCollection(from: "{year}-01-01T00:00:00Z", to: "{year}-12-31T23:59:59Z") '
-        "{ contributionCalendar { totalContributions } }"
-        for year in years
-    ]
-    query = f"query($login: String!) {{ user(login: $login) {{ {' '.join(parts)} }} }}"
+class Total(NamedTuple):
+    count: int
+    complete: bool  # False: the headline was missing and only the day cells were added up
+
+
+async def _last_year_graphql(client: httpx.AsyncClient, login: str) -> Total:
+    query = "query($login: String!) { user(login: $login) { contributionsCollection { contributionCalendar { totalContributions } } } }"
     try:
-        response = await client.post(
-            f"{API}/graphql", json={"query": query, "variables": {"login": username}}, headers=_headers()
-        )
+        response = await client.post(f"{API}/graphql", json={"query": query, "variables": {"login": login}}, headers=_headers())
         data = response.json()
     except (httpx.HTTPError, ValueError) as exc:
         raise GitHubUnavailable(str(exc)) from exc
@@ -190,47 +191,48 @@ async def _all_time_graphql(client: httpx.AsyncClient, username: str, years: lis
     if response.status_code != 200 or not user:
         raise GitHubUnavailable(f"GraphQL: {data.get('errors') or response.status_code}")
     try:
-        return sum(_number(user[f"y{year}"]["contributionCalendar"]["totalContributions"]) for year in years)
+        value = user["contributionsCollection"]["contributionCalendar"]["totalContributions"]
     except (KeyError, TypeError) as exc:
         raise GitHubUnavailable("GraphQL answered in an unexpected shape") from exc
+    if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value < 10**9:
+        raise GitHubUnavailable("GraphQL answered in an unexpected shape")
+    return Total(value, True)
 
 
-async def _year_from_calendar(client: httpx.AsyncClient, username: str, year: int) -> int:
+def parse_calendar(text: str) -> Total:
+    """GitHub's calendar fragment: the headline ("2,299 contributions in the last year", or "in
+    2026" on a calendar-year page), else the day cells added up (marked incomplete)."""
+    heading = YEAR_TOTAL.search(text)
+    if heading:
+        return Total(int(heading.group(1).replace(",", "")), True)
+    return Total(sum(int(n) for n in DAY_COUNT.findall(text)), False)
+
+
+async def _last_year_calendar(client: httpx.AsyncClient, login: str) -> Total:
     try:
         response = await client.get(
-            f"https://github.com/users/{username}/contributions",
-            params={"from": f"{year}-01-01", "to": f"{year}-12-31"},
+            f"https://github.com/users/{login}/contributions",
             headers={**_headers(json=False), "X-Requested-With": "XMLHttpRequest"},
         )
     except httpx.HTTPError as exc:
         raise GitHubUnavailable(str(exc)) from exc
     if response.status_code != 200:
         raise GitHubUnavailable(f"Calendar answered {response.status_code}")
-    heading = YEAR_TOTAL.search(response.text)
-    if heading and int(heading.group(2)) == year:
-        return int(heading.group(1).replace(",", ""))
-    # No heading (layout change): add up the days.
-    return sum(int(n) for n in DAY_COUNT.findall(response.text))
+    return parse_calendar(response.text)
 
 
-async def _all_time_calendar(client: httpx.AsyncClient, username: str, years: list[int]) -> int:
-    gate = asyncio.Semaphore(4)
-
-    async def one(year: int) -> int:
-        async with gate:
-            return await _year_from_calendar(client, username, year)
-
-    return sum(await asyncio.gather(*(one(year) for year in years)))
-
-
-def _years_since(created_at: str | None) -> list[int]:
-    now = datetime.now(UTC).year
-    start = int(created_at[:4]) if created_at else now - 9
-    return list(range(max(2008, start), now + 1))
+async def last_year_total(client: httpx.AsyncClient, login: str) -> Total:
+    """The profile headline for `login` (already checked against USERNAME)."""
+    if get_settings().github_token:
+        try:
+            return await _last_year_graphql(client, login)
+        except GitHubUnavailable as exc:
+            log.warning("GitHub GraphQL failed for %s (%s); reading the public calendar", login, exc)
+    return await _last_year_calendar(client, login)
 
 
-async def all_time_contributions(username: str, client: httpx.AsyncClient | None = None) -> tuple[dict, int] | None:
-    """(profile, all-time total), or None if the user does not exist. Raises GitHubUnavailable."""
+async def contributions(username: str, client: httpx.AsyncClient | None = None) -> tuple[dict, Total] | None:
+    """(profile, total in the last year), or None if the user does not exist. Raises GitHubUnavailable."""
     if not USERNAME.match(username or ""):
         return None
     own = client is None
@@ -239,17 +241,18 @@ async def all_time_contributions(username: str, client: httpx.AsyncClient | None
         profile = await fetch_profile(client, username)
         if profile is None:
             return None
-        years = _years_since(profile.get("created_at"))
-        login = _login(profile, username)
-        if get_settings().github_token:
-            try:
-                return profile, await _all_time_graphql(client, login, years)
-            except GitHubUnavailable as exc:
-                log.warning("GitHub GraphQL failed for %s (%s); reading the public calendar", login, exc)
-        return profile, await _all_time_calendar(client, login, years)
+        return profile, await last_year_total(client, _login(profile, username))
     finally:
         if own:
             await client.aclose()
+
+
+def apply_total(user, total: Total) -> None:
+    """Stores a fresh total on the user. An incomplete one never lowers a cached figure."""
+    cached = user.github_contribution_count
+    if total.complete or cached is None or total.count >= cached:
+        user.github_contribution_count = total.count
+    user.github_synced_at = datetime.now(UTC)
 
 
 REPO_NAME = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
@@ -338,8 +341,17 @@ def is_stale(synced_at: datetime | None) -> bool:
     return datetime.now(UTC) - synced_at > timedelta(hours=hours)
 
 
+async def refresh_count(username: str) -> Total:
+    """Only the calendar/GraphQL total of an already verified username (no api.github.com call)."""
+    if not USERNAME.match(username or ""):
+        raise GitHubUnavailable("Not a GitHub username")
+    async with _client() as client:
+        return await last_year_total(client, username)
+
+
 async def sync_user(user_id: str, fresh: bool = False) -> None:
-    """Refreshes a user's cached all-time total (in the background after sign-up, or when stale)."""
+    """Refreshes a user's cached total (in the background after sign-up, or when stale). Any
+    failure leaves the cached total and its date as they were, so the next view tries again."""
     from app.db import SessionLocal
     from app.models import User
 
@@ -349,36 +361,38 @@ async def sync_user(user_id: str, fresh: bool = False) -> None:
         if user is None or username is None:
             return
         try:
-            result = await (all_time_contributions(username) if fresh else lookup(username))
+            if fresh and user.github_verified:
+                apply_total(user, await refresh_count(username))
+            else:
+                result = await (contributions(username) if fresh else lookup(username))
+                if result is None:
+                    user.github_verified = False
+                else:
+                    profile, total = result
+                    user.github_url = f"https://github.com/{_login(profile, username)}"
+                    user.github_verified = True
+                    apply_total(user, total)
         except GitHubUnavailable as exc:
             log.warning("GitHub sync for %s skipped: %s", user_id, exc)
             return
-        if result is None:
-            user.github_verified = False
-        else:
-            profile, total = result
-            user.github_url = f"https://github.com/{_login(profile, username)}"
-            user.github_verified = True
-            user.github_contribution_count = total
-            user.github_synced_at = datetime.now(UTC)
         db.commit()
 
 
 # Lookups are cached briefly: the signup and profile forms check a username and then save it,
 # so the second request reuses the first answer instead of walking the calendar again.
-_LOOKUPS: dict[str, tuple[datetime, tuple[dict, int] | None]] = {}
+_LOOKUPS: dict[str, tuple[datetime, tuple[dict, Total] | None]] = {}
 _LOOKUP_TTL = timedelta(minutes=10)
 _LOOKUP_MAX = 1000  # bounded: a stream of made-up names can't grow it without end
 
 
-async def lookup(username: str) -> tuple[dict, int] | None:
+async def lookup(username: str) -> tuple[dict, Total] | None:
     if not USERNAME.match(username or ""):
         return None
     key = username.lower()
     cached = _LOOKUPS.get(key)
     if cached and datetime.now(UTC) - cached[0] < _LOOKUP_TTL:
         return cached[1]
-    result = await all_time_contributions(username)
+    result = await contributions(username)
     if len(_LOOKUPS) >= _LOOKUP_MAX:
         _LOOKUPS.pop(next(iter(_LOOKUPS)))  # the oldest entry
     _LOOKUPS[key] = (datetime.now(UTC), result)

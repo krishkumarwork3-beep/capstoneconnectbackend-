@@ -26,6 +26,7 @@ PUBLIC = {
     ("GET", "/api/announcements"),           # the banner shows to guests too
     ("GET", "/api/github/verify"),           # used during sign-up, before an account exists
     ("GET", "/api/health"),
+    ("GET", "/api/stats/signups"),         # one aggregate number, cached, limited per IP
     ("GET", "/uploads/{purpose}/{name}"),    # avatars public; résumés/attachments checked inside
     ("POST", "/api/admin/auth/login"),
     ("POST", "/api/admin/auth/logout"),

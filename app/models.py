@@ -62,7 +62,7 @@ class User(Base):
 
     github_url: Mapped[str | None] = mapped_column(String(300))
     github_verified: Mapped[bool] = mapped_column(Boolean, default=False)
-    # All-time GitHub contributions, cached; null until the first successful lookup.
+    # GitHub contributions in the last year (the profile headline), cached; null until the first lookup.
     github_contribution_count: Mapped[int | None] = mapped_column(Integer)
     github_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -207,6 +207,9 @@ class AuthSession(Base):
     created_at: Mapped[datetime] = _now_column()
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Last time the session was used (refreshed at most every few minutes): a sign-in unused for
+    # SESSION_IDLE_DAYS ends even before expires_at (sliding idle expiry).
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     user_agent: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
 

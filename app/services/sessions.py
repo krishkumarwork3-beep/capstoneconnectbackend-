@@ -21,10 +21,16 @@ from sqlalchemy import delete, text, update
 from sqlalchemy.orm import Session
 
 from app import realtime
+from app.config import get_settings
+from app.db import SessionLocal
 from app.models import AuthSession
 from app.security import decode_token, encode_token, token_matches_password
 
 KINDS = ("student", "admin", "reset", "ws")
+# Sign-ins (not reset grants or socket tickets) also end when idle or too old; see resolve().
+SIGN_INS = ("student", "admin")
+# last_used_at is written at most this often per session (not on every request).
+TOUCH_EVERY = timedelta(minutes=5)
 
 
 def _now() -> datetime:
@@ -52,8 +58,9 @@ def resolve(db: Session, token: str | None, kind: str) -> tuple[str, str, str] |
     row = db.get(AuthSession, claims["sid"])
     if row is None or row.kind != kind or row.subject_id != claims["sub"] or row.revoked_at is not None:
         return None
-    expires = row.expires_at if row.expires_at.tzinfo else row.expires_at.replace(tzinfo=UTC)
-    if expires <= _now():
+    if _aware(row.expires_at) <= _now():
+        return None
+    if kind in SIGN_INS and not _still_fresh(row):
         return None
     return claims["sub"], claims["sid"], str(claims.get("pv", ""))
 
@@ -146,3 +153,23 @@ def spend_ticket(db: Session, ticket: str, user_id: str, session_id: str) -> boo
     if claims is None or claims["sub"] != user_id or claims.get("psid") != session_id:
         return False
     return db.execute(_SPEND_TICKET, {"sid": claims["sid"], "sub": user_id}).first() is not None
+
+
+def _aware(at: datetime) -> datetime:
+    return at if at.tzinfo else at.replace(tzinfo=UTC)
+
+
+def _still_fresh(row: AuthSession) -> bool:
+    """Absolute lifetime (SESSION_MAX_DAYS from sign-in) and sliding idle expiry
+    (SESSION_IDLE_DAYS since last use). Refreshes last_used_at, on its own connection so a
+    read-only request still counts as use."""
+    settings, now = get_settings(), _now()
+    created = _aware(row.created_at)
+    last = _aware(row.last_used_at or row.created_at)
+    if now - created > timedelta(days=settings.session_max_days) or now - last > timedelta(days=settings.session_idle_days):
+        return False
+    if now - last > TOUCH_EVERY:
+        with SessionLocal() as own:
+            own.execute(update(AuthSession).where(AuthSession.id == row.id).values(last_used_at=now))
+            own.commit()
+    return True

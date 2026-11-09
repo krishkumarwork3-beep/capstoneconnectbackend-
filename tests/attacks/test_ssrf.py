@@ -153,7 +153,7 @@ def test_the_lookup_cache_is_bounded(monkeypatch):
     async def fake(username, client=None):
         return None
 
-    monkeypatch.setattr(github, "all_time_contributions", fake)
+    monkeypatch.setattr(github, "contributions", fake)
     monkeypatch.setattr(github, "_LOOKUPS", {})
     for i in range(github._LOOKUP_MAX + 50):
         asyncio.run(github.lookup(f"user{i}"))

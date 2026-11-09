@@ -70,6 +70,7 @@ def main() -> None:
         "SIGNUP_LIMIT_PER_IP": "500",
         "RESET_LIMIT_PER_IP": "500",
         "VERIFY_LIMIT_PER_IP": "500",
+        "PUBLIC_STATS_LIMIT_PER_IP": "100000",
         "CORS_ORIGINS": '["http://localhost:3000","http://127.0.0.1:3000","http://localhost:3100"]',
         "PUBLIC_BASE_URL": f"http://localhost:{args.port}",
     })

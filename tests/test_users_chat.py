@@ -32,7 +32,7 @@ def test_profile_edit_is_yours_only_and_locks_identity(as_user):
 
 def test_github_verification_is_done_by_the_server(as_user, monkeypatch):
     async def fake_lookup(username):
-        return ({"login": "Meera-Real"}, 1234) if username.lower() == "meera-real" else None
+        return ({"login": "Meera-Real"}, github.Total(1234, True)) if username.lower() == "meera-real" else None
 
     monkeypatch.setattr(github, "lookup", fake_lookup)
     c = as_user("usr_8")
@@ -53,19 +53,6 @@ def test_github_verification_is_done_by_the_server(as_user, monkeypatch):
 )
 def test_github_usernames(value, expected):
     assert github.username_from(value) == expected
-
-
-def test_all_time_total_adds_every_year(monkeypatch):
-    async def profile(client, username):
-        return {"login": username, "created_at": "2024-03-01T00:00:00Z"}
-
-    async def year(client, username, y):
-        return {2024: 10, 2025: 200}.get(y, 5)
-
-    monkeypatch.setattr(github, "fetch_profile", profile)
-    monkeypatch.setattr(github, "_year_from_calendar", year)
-    _, total = asyncio.run(github.all_time_contributions("someone"))
-    assert total == 10 + 200 + 5 * (len(github._years_since("2024")) - 2)
 
 
 def test_uploads_check_content(as_user):

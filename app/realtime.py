@@ -18,7 +18,7 @@ from datetime import datetime
 import psycopg
 import psycopg.sql
 from fastapi import WebSocket
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
@@ -32,6 +32,8 @@ CHANNEL = "capconnect_events"
 MAX_PAYLOAD = 7800
 # A socket that falls this far behind is closed; the client reconnects and catches up.
 QUEUE_SIZE = 256
+# A socket whose client stops reading: one write that takes longer than this closes it.
+SEND_TIMEOUT = 10.0
 
 
 def _json_default(value):
@@ -104,7 +106,13 @@ class Connection:
     async def pump(self) -> None:
         while True:
             event = await self.queue.get()
-            await self.ws.send_text(_dumps(event))
+            try:
+                await asyncio.wait_for(self.ws.send_text(_dumps(event)), SEND_TIMEOUT)
+            except TimeoutError:
+                # The client stopped reading (its TCP window is full): let it go.
+                log.warning("closing a socket of %s that stopped reading", self.user_id)
+                self.close(1013, "Too slow")
+                return
             if event.get("type") == "session.ended":
                 # Suspended, blocked, password reset or deleted: this socket is done.
                 await self.ws.close(code=4401, reason="Your session ended")
@@ -202,11 +210,32 @@ class Listener(threading.Thread):
     def _handle(self, payload: str) -> None:
         try:
             data = json.loads(payload)
+            here = [user_id for user_id in data["to"] if hub.count(user_id)]
+            if not here:
+                return  # none of them has a socket in this process
             event = data.get("event") or _load_message_event(data["ref"], data.get("client_id"))
             if event:
-                hub.deliver(data["to"], event)
+                hub.deliver(current_recipients(here, event), event)
         except Exception:
             log.exception("could not deliver a realtime event")
+
+
+def current_recipients(to: list[str], event: dict) -> list[str]:
+    """Re-checked at fan-out, not only when the event was published: of `to`, those who are in the
+    event's conversation right now and not suspended. Someone removed from a group (or suspended)
+    between the publish and the delivery gets nothing. Events about no conversation pass as is."""
+    conversation_id = event.get("conversation_id") or (event.get("message") or {}).get("conversation_id")
+    if not conversation_id:
+        return list(to)
+    from app.models import ConversationParticipant, User
+
+    with SessionLocal() as db:
+        return list(db.scalars(
+            select(ConversationParticipant.user_id)
+            .join(User, User.id == ConversationParticipant.user_id)
+            .where(ConversationParticipant.conversation_id == conversation_id,
+                   ConversationParticipant.user_id.in_(list(to)), User.banned_at.is_(None))
+        ))
 
 
 def _load_message_event(message_id: str, client_id: str | None) -> dict | None:

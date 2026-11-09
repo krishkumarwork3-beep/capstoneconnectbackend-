@@ -41,6 +41,7 @@ from app.models import (
 )
 from app.security import hash_password, new_id, normalize_phone, verify_password
 from app.services import sessions
+from app.services import stats as stats_service
 from app.passwords import ensure_good_password
 from app.services import admin as ops
 from app.services import github, uploads
@@ -177,7 +178,7 @@ def stats(_: CurrentAdmin, db: DB):
     per_day = dict(db.execute(select(day, func.count()).where(day >= since).group_by(day)).all())
     signups = [{"date": (since + timedelta(days=i)).isoformat(), "count": per_day.get(since + timedelta(days=i), 0)} for i in range(30)]
     in_group = count(GroupMember)
-    total_users = count(User)
+    total_users = stats_service.signup_total(db)  # the same query as the public GET /api/stats/signups
     groups = list(db.scalars(select(Group)))
     return {
         "users": {

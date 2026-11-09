@@ -125,12 +125,14 @@ WRITE_LIMITS: dict[str, tuple[int, timedelta]] = {
     # Socket only, but per account: ten sockets don't get ten times the budget.
     "typing": (60, timedelta(minutes=1)),
     "ws_ticket": (60, timedelta(minutes=10)),
+    "public_stats": (60, timedelta(minutes=1)),  # per IP address; PUBLIC_STATS_LIMIT_PER_IP
 }
 
 
-def per_account(db: Session, action: str, who: str) -> None:
+def per_account(db: Session, action: str, who: str, limit: int | None = None) -> None:
     """Counts one write for this account (or address) and refuses (429) once over the limit."""
-    limit, window = WRITE_LIMITS[action]
+    default, window = WRITE_LIMITS[action]
+    limit = default if limit is None else limit
     count, start = db.execute(_HIT, {"key": f"{action}:who:{who}", "window": window}).one()
     db.commit()
     if count > limit:

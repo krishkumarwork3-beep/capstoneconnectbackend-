@@ -364,6 +364,12 @@ class CountsOut(BaseModel):
     outcomeUpdates: int
 
 
+class SignupTotalOut(BaseModel):
+    """GET /api/stats/signups: one number, nothing about anyone."""
+
+    total: int
+
+
 class GitHubLookupOut(BaseModel):
     valid: bool
     username: str

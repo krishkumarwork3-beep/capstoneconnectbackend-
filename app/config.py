@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     # The "iss" of every token this API signs (and the only one it accepts).
     jwt_issuer: str = Field(default="capstoneconnect", min_length=1, max_length=100)
     session_days: int = 14
+    # A sign-in unused this long ends (sliding); none outlives SESSION_MAX_DAYS from sign-in,
+    # whatever its expires_at says (absolute). Both enforced for HTTP and the live socket.
+    session_idle_days: int = Field(default=7, ge=1)
+    # GET /api/stats/signups per IP address per minute (raised for end-to-end runs from one address).
+    public_stats_limit_per_ip: int = Field(default=60, ge=1)
+    session_max_days: int = Field(default=30, ge=1, le=30)
     # Cookies need Secure over HTTPS (production); local http://localhost needs it off.
     cookie_secure: bool = False
     cookie_name: str = "cc_session"

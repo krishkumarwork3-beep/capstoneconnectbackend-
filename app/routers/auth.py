@@ -124,7 +124,9 @@ def logout_everywhere(response: Response, user: CurrentUser, db: DB):
 
 
 @router.get("/me", response_model=schemas.UserOut)
-def me(user: CurrentUser):
+def me(user: CurrentUser, background: BackgroundTasks):
+    if user.github_verified and github.is_stale(user.github_synced_at):
+        background.add_task(github.sync_user, user.id, True)  # the next load shows the fresh total
     return user_out(user)
 
 
