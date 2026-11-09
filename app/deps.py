@@ -5,10 +5,10 @@ from typing import Annotated
 from fastapi import Depends, Path, Request
 from sqlalchemy.orm import Session
 
+from app.cookies import admin_cookie, student_cookie
 from app.db import get_db
 from app.errors import AppError
 from app.models import AdminUser, User
-from app.cookies import admin_cookie, student_cookie
 from app.services import bans, sessions
 
 DB = Annotated[Session, Depends(get_db)]
@@ -36,10 +36,10 @@ def optional_user(request: Request, db: DB) -> User | None:
         if user is not None:
             bans.ensure_can_sign_in(db, user)
         return None
-    user_id, session_id, fingerprint = found
+    user_id, session_id = found
     user = db.get(User, user_id)
-    # A password change invalidates every session issued before it (the rows are revoked too).
-    if not user or not sessions.check_password(fingerprint, user.password_hash):
+    # A password change ends every session (the rows are revoked), so no token outlives it.
+    if not user:
         return None
     # Suspended (or on a blocked number) in the admin portal: signed out at once.
     bans.ensure_can_sign_in(db, user)
@@ -65,8 +65,8 @@ OptionalUser = Annotated[User | None, Depends(optional_user)]
 def current_admin(request: Request, db: DB) -> AdminUser:
     found = sessions.resolve(db, request.cookies.get(admin_cookie()), "admin")
     admin = db.get(AdminUser, found[0]) if found else None
-    # A password change, deactivation or log-out ends the admin's sessions.
-    if admin is None or not admin.active or not sessions.check_password(found[2], admin.password_hash):
+    # A password change, deactivation or log-out ends the admin's sessions (rows revoked).
+    if admin is None or not admin.active:
         raise AppError("Sign in to the admin portal", 401)
     request.state.admin_session_id = found[1]
     return admin

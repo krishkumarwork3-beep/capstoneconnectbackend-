@@ -125,6 +125,7 @@ WRITE_LIMITS: dict[str, tuple[int, timedelta]] = {
     # Socket only, but per account: ten sockets don't get ten times the budget.
     "typing": (60, timedelta(minutes=1)),
     "ws_ticket": (60, timedelta(minutes=10)),
+    "refresh": (60, timedelta(minutes=10)),  # POST /api/auth/refresh and the admin one, per IP address
     "stats_read": (60, timedelta(minutes=1)),  # GET /api/stats/signups, per signed-in account
     # Reads (app.services.reads): the counts come from the READ_* settings; these are the windows.
     "read_profile_view": (300, timedelta(minutes=10)),

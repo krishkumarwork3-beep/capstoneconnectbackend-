@@ -4,16 +4,22 @@ Sign-in, sign-up and every password-reset step are throttled per phone number an
 address (app.services.limits).
 """
 
+from datetime import timedelta
+
 from fastapi import APIRouter, BackgroundTasks, Request, Response
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app import schemas
 from app.config import get_settings
-from datetime import timedelta
-
-from app.cookies import clear_session_cookie, set_session_cookie, student_cookie
-from app.deps import PathId, DB, CurrentUser, OptionalUser
+from app.cookies import (
+    clear_sign_in_cookies,
+    refresh_cookie,
+    set_sign_in_cookies,
+    student_cookie,
+)
+from app.deps import DB, CurrentUser, OptionalUser, PathId
 from app.errors import AppError
 from app.models import User, utcnow
 from app.passwords import ensure_good_password
@@ -34,15 +40,49 @@ def _bearer(request: Request) -> str | None:
     return header[7:].strip() or None if header.lower().startswith("bearer ") else None
 
 
+def _end_current(request: Request, db) -> None:
+    """Revokes the sign-in this browser came with, by its access or its refresh token."""
+    sessions.revoke_token(db, request.cookies.get(student_cookie()) or _bearer(request), "student")
+    row = sessions.session_of_refresh(db, request.cookies.get(refresh_cookie()))
+    if row is not None and row.kind == "student":
+        sessions.end_family(db, row)
+
+
 def _start_session(request: Request, response: Response, db, user: User) -> None:
-    """Always a brand-new session row (whatever cookie the browser came with is revoked, so a
-    session planted before sign-in is never promoted), committed before the cookie is sent."""
+    """Always a brand-new session (whatever the browser came with is revoked, so a session planted
+    before sign-in is never promoted), committed before the cookies are sent: a 15-minute access
+    token and a refresh token that rotates on every use."""
     settings = get_settings()
-    sessions.revoke_token(db, request.cookies.get(student_cookie()), "student")
-    token = sessions.start(db, "student", user.id, user.password_hash, timedelta(days=settings.session_days), request)
+    _end_current(request, db)
+    access, refresh, _ = sessions.sign_in(db, "student", user.id, timedelta(days=settings.session_days), request)
     db.commit()
     # SameSite, Secure and Domain come from the settings (see app.cookies for the layouts).
-    set_session_cookie(response, student_cookie(), token, settings.session_days * 86400)
+    set_sign_in_cookies(response, "student", access, refresh, settings.session_days * 86400)
+
+
+def _signed_out(message: str = "Sign in to continue", status: int = 401) -> JSONResponse:
+    reply = JSONResponse({"message": message}, status_code=status)
+    clear_sign_in_cookies(reply, "student")
+    return reply
+
+
+@router.post("/refresh", status_code=204, responses={401: {"description": "No live session: sign in again"}})
+def refresh(request: Request, response: Response, db: DB):
+    """A new access token (and the next refresh token) from the refresh cookie. CSRF-checked like
+    every cookie write (app.guard), rate limited per address. A refresh token works once: a
+    replayed one ends the session everywhere it is used."""
+    limits.per_account(db, "refresh", f"ip:{limits.client_ip(request)}")
+    renewed = sessions.refresh(db, request.cookies.get(refresh_cookie()), "student")
+    db.commit()
+    if renewed is None:
+        return _signed_out()
+    user = db.get(User, renewed.subject_id)
+    if user is None or bans.is_blocked(db, user):
+        sessions.revoke(db, renewed.session_id)
+        db.commit()
+        return _signed_out()
+    remaining = int((renewed.expires_at - utcnow()).total_seconds())
+    set_sign_in_cookies(response, "student", renewed.access, renewed.refresh, remaining)
 
 
 @router.post("/signup", response_model=schemas.UserOut, status_code=201)
@@ -109,10 +149,11 @@ def login(payload: schemas.LoginIn, request: Request, response: Response, db: DB
 
 @router.post("/logout", status_code=204)
 def logout(request: Request, response: Response, db: DB):
-    """Ends this session on the server (a copy of the cookie stops working too)."""
-    sessions.revoke_token(db, request.cookies.get(student_cookie()) or _bearer(request), "student")
+    """Ends this session on the server and deletes its refresh tokens (a copy of either cookie
+    stops working too)."""
+    _end_current(request, db)
     db.commit()
-    clear_session_cookie(response, student_cookie())
+    clear_sign_in_cookies(response, "student")
 
 
 @router.post("/logout-all", status_code=204)
@@ -120,7 +161,7 @@ def logout_everywhere(response: Response, user: CurrentUser, db: DB):
     """Sign out everywhere: every session of this account, on every device, ends now."""
     admin_ops.end_sessions(db, [user.id])  # every session and reset grant; open tabs are told at once
     db.commit()
-    clear_session_cookie(response, student_cookie())
+    clear_sign_in_cookies(response, "student")
 
 
 @router.get("/me", response_model=schemas.UserOut)

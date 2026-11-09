@@ -13,7 +13,7 @@ from typing import Literal
 from typing import Annotated
 
 from fastapi import APIRouter, Path as PathParam, Query, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import Date, cast, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
@@ -21,7 +21,7 @@ from app import search as like_text
 from app.links import csv_cell
 from app import admin_schemas as s
 from app.config import get_settings
-from app.cookies import admin_cookie, clear_session_cookie, set_session_cookie
+from app.cookies import admin_cookie, admin_refresh_cookie, clear_sign_in_cookies, set_sign_in_cookies
 from app.deps import PathId, DB, AdminWriter, CurrentAdmin
 from app.errors import AppError, not_found
 from app.models import (
@@ -40,7 +40,7 @@ from app.models import (
     utcnow,
 )
 from app.security import hash_password, new_id, normalize_phone, verify_password
-from app.services import sessions
+from app.services import limits, sessions
 from app.services import stats as stats_service
 from app.passwords import ensure_good_password
 from app.services import admin as ops
@@ -61,13 +61,40 @@ def _paged(page: int, page_size: int) -> tuple[int, int]:
 auth = APIRouter(tags=["admin: sign-in"])
 
 
-def _start_admin_session(request: Request, response: Response, db, admin: AdminUser) -> None:
-    """A new session row every time (the cookie the browser came with is revoked first)."""
-    settings = get_settings()
+def _end_current_admin(request: Request, db) -> None:
     sessions.revoke_token(db, request.cookies.get(admin_cookie()), "admin")
-    token = sessions.start(db, "admin", admin.id, admin.password_hash, timedelta(hours=settings.admin_session_hours), request)
+    row = sessions.session_of_refresh(db, request.cookies.get(admin_refresh_cookie()))
+    if row is not None and row.kind == "admin":
+        sessions.revoke(db, row.id)
+
+
+def _start_admin_session(request: Request, response: Response, db, admin: AdminUser) -> None:
+    """A new session every time (whatever the browser came with is revoked first): a 15-minute
+    access token and a rotating refresh token, like students', with the admin audience."""
+    settings = get_settings()
+    _end_current_admin(request, db)
+    access, refresh, _ = sessions.sign_in(db, "admin", admin.id, timedelta(hours=settings.admin_session_hours), request)
     db.commit()
-    set_session_cookie(response, admin_cookie(), token, settings.admin_session_hours * 3600)
+    set_sign_in_cookies(response, "admin", access, refresh, settings.admin_session_hours * 3600)
+
+
+@auth.post("/auth/refresh", status_code=204, responses={401: {"description": "No live admin session"}})
+def admin_refresh(request: Request, response: Response, db: DB):
+    """The admin portal's refresh: same rules as students' (rotation, replay ends the session,
+    CSRF-checked, limited per address)."""
+    limits.per_account(db, "refresh", f"ip:{limits.client_ip(request)}")
+    renewed = sessions.refresh(db, request.cookies.get(admin_refresh_cookie()), "admin")
+    db.commit()
+    admin = db.get(AdminUser, renewed.subject_id) if renewed else None
+    if renewed is None or admin is None or not admin.active:
+        if renewed is not None:
+            sessions.revoke(db, renewed.session_id)
+            db.commit()
+        reply = JSONResponse({"message": "Sign in to the admin portal"}, status_code=401)
+        clear_sign_in_cookies(reply, "admin")
+        return reply
+    remaining = int((renewed.expires_at - utcnow()).total_seconds())
+    set_sign_in_cookies(response, "admin", renewed.access, renewed.refresh, remaining)
 
 
 @auth.post("/auth/login", response_model=s.AdminOut)
@@ -79,10 +106,11 @@ def admin_login(payload: s.AdminLoginIn, request: Request, response: Response, d
 
 @auth.post("/auth/logout", status_code=204)
 def admin_logout(request: Request, response: Response, db: DB):
-    """Ends this session on the server: a copy of the cookie stops working too."""
-    sessions.revoke_token(db, request.cookies.get(admin_cookie()), "admin")
+    """Ends this session on the server and deletes its refresh tokens: a copy of either cookie
+    stops working too."""
+    _end_current_admin(request, db)
     db.commit()
-    clear_session_cookie(response, admin_cookie())
+    clear_sign_in_cookies(response, "admin")
 
 
 @auth.post("/auth/logout-all", status_code=204)
@@ -91,7 +119,7 @@ def admin_logout_everywhere(response: Response, admin: CurrentAdmin, db: DB):
     sessions.revoke_all(db, "admin", [admin.id])
     ops.record(db, admin, "admin.logout_all", "Signed out of every session", "admin", admin.id)
     db.commit()
-    clear_session_cookie(response, admin_cookie())
+    clear_sign_in_cookies(response, "admin")
 
 
 @auth.get("/auth/me", response_model=s.AdminOut)

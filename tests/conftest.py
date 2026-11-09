@@ -90,7 +90,7 @@ def schema():
 @pytest.fixture(autouse=True)
 def demo_data(schema):
     with SessionLocal() as db:
-        db.execute(text(f"TRUNCATE {TABLES}, admin_users, banned_phones, audit_log, rate_limits, reports, announcements, auth_sessions, socket_tickets, login_lockouts CASCADE"))
+        db.execute(text(f"TRUNCATE {TABLES}, admin_users, banned_phones, audit_log, rate_limits, reports, announcements, auth_sessions, refresh_tokens, socket_tickets, login_lockouts CASCADE"))
         db.commit()
         seed(db)
     reset_lockouts()

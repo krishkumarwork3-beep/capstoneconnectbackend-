@@ -17,6 +17,7 @@ import json
 from urllib.parse import parse_qsl, urlsplit
 
 from app.config import get_settings
+from app.cookies import all_session_cookie_names
 
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
@@ -114,7 +115,7 @@ class RequestGuardMiddleware:
         if method not in SAFE_METHODS:
             cookie = headers.get("cookie", "")
             names_in_cookie = {part.split("=", 1)[0].strip() for part in cookie.split(";") if "=" in part}
-            ours = {s.cookie_name, s.admin_cookie_name, f"__Host-{s.cookie_name}", f"__Host-{s.admin_cookie_name}"}
+            ours = all_session_cookie_names()
             if names_in_cookie & ours:
                 origin = headers.get("origin") or (_origin_of(headers["referer"]) if headers.get("referer") else None)
                 if origin is not None and origin.rstrip("/") not in allowed_origins():

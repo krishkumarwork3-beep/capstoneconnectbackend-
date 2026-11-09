@@ -24,7 +24,12 @@ class Settings(BaseSettings):
     secret_key: str = Field(default=DEV_SECRET_KEY, min_length=32)
     # The "iss" of every token this API signs (and the only one it accepts).
     jwt_issuer: str = Field(default="capstoneconnect", min_length=1, max_length=100)
-    session_days: int = 14
+    # A sign-in lasts SESSION_DAYS at most (absolute; students), renewed by a rotating refresh
+    # token; the access token in the session cookie lives ACCESS_TOKEN_MINUTES (at most 15).
+    session_days: int = Field(default=14, ge=1, le=30)
+    access_token_minutes: int = Field(default=15, ge=1, le=15)
+    refresh_cookie_name: str = "cc_refresh"
+    admin_refresh_cookie_name: str = "cc_admin_refresh"
     # A sign-in unused this long ends (sliding); none outlives SESSION_MAX_DAYS from sign-in,
     # whatever its expires_at says (absolute). Both enforced for HTTP and the live socket.
     session_idle_days: int = Field(default=7, ge=1)

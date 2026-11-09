@@ -212,11 +212,22 @@ def _session_user(token: str | None) -> tuple[str, str, str] | None:
         if not found:
             return None
         user = db.get(User, found[0])
-        if not user or not sessions.check_password(found[2], user.password_hash):
+        if not user:
             return None
         if bans.is_blocked(db, user):  # suspended in the admin portal: the socket closes (4401)
             return None
         return user.id, user.name, found[1]
+
+
+def _session_alive(session_id: str, user_id: str) -> bool:
+    """After the handshake the socket follows the session row, not the access token in the cookie
+    it opened with (that lives 15 minutes and is renewed by the page): a refresh keeps the socket,
+    a log-out, revocation, expiry, idle timeout, suspension or deletion closes it."""
+    with SessionLocal() as db:
+        if sessions.live(db, session_id, "student") != user_id:
+            return False
+        user = db.get(User, user_id)
+        return user is not None and not bans.is_blocked(db, user)
 
 
 def _presence(user_id: str, online: bool) -> None:
@@ -233,8 +244,8 @@ def _presence(user_id: str, online: bool) -> None:
         db.commit()
 
 
-def _heartbeat(token: str | None, user_id: str) -> bool:
-    if _session_user(token) is None:
+def _heartbeat(session_id: str, user_id: str) -> bool:
+    if not _session_alive(session_id, user_id):
         return False
     with SessionLocal() as db:
         user = db.get(User, user_id)
@@ -338,6 +349,7 @@ class _State:
     token: str | None
     user_id: str
     name: str
+    session_id: str = ""
     last_heartbeat: float = field(default_factory=time.monotonic)
     typing_sent: dict[str, tuple[bool, float]] = field(default_factory=dict)
     bad_frames: int = 0
@@ -363,7 +375,7 @@ async def _handle(ws: WebSocket, conn: "realtime.Connection", frame: "Frame", st
     """Acts on one valid frame. True when the socket was closed."""
     kind = frame.type
     conversation_id = getattr(frame, "conversation_id", None)
-    if kind != "ping" and await run_in_threadpool(_session_user, state.token) is None:
+    if kind != "ping" and not await run_in_threadpool(_session_alive, state.session_id, state.user_id):
         # Checked on every frame that acts, not only at the handshake and the heartbeat: a
         # session ended any way (even if its push was lost) can't act once more.
         await ws.close(code=4401, reason="Your session ended")
@@ -377,7 +389,7 @@ async def _handle(ws: WebSocket, conn: "realtime.Connection", frame: "Frame", st
         conn.push({"type": "pong"})
         if time.monotonic() - state.last_heartbeat >= HEARTBEAT_SECONDS:
             state.last_heartbeat = time.monotonic()
-            if not await run_in_threadpool(_heartbeat, state.token, state.user_id):
+            if not await run_in_threadpool(_heartbeat, state.session_id, state.user_id):
                 await ws.close(code=4401, reason="Your session ended")
                 return True
         return False
@@ -418,7 +430,7 @@ async def _heartbeat_loop(ws: WebSocket, conn: "realtime.Connection", state: _St
         now = time.monotonic()
         if now - checked_at >= SESSION_RECHECK_SECONDS:
             checked_at = now
-            if await run_in_threadpool(_session_user, state.token) is None:
+            if not await run_in_threadpool(_session_alive, state.session_id, state.user_id):
                 conn.close(4401, "Your session ended")
                 return
         if state.awaiting is not None:
@@ -500,7 +512,7 @@ async def socket(ws: WebSocket):
     if first:
         await run_in_threadpool(_presence, user_id, True)
 
-    state = _State(token=token, user_id=user_id, name=name)
+    state = _State(token=token, user_id=user_id, name=name, session_id=session_id)
     beats = asyncio.create_task(_heartbeat_loop(ws, conn, state))
     recent: list[float] = []
     try:

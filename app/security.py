@@ -51,30 +51,23 @@ def e164(phone_normalized: str) -> str:
 # ---------------------------------------------------------------------------------------------
 # Signed tokens: HS256 only, with a fixed issuer and one audience per kind, so a student cookie is
 # never accepted as an admin one, nor a reset grant as a session. Each names a server-side row
-# (`sid`, app.services.sessions) that can be revoked, and carries a fingerprint of the password
-# hash as a second check.
+# (`sid`, app.services.sessions) that can be revoked. They carry exactly CLAIMS: no names, phones,
+# emails, roles or counts (roles are read from the database on every request).
 # ---------------------------------------------------------------------------------------------
 
 ALGORITHM = "HS256"
 AUDIENCES = {"student": "capstoneconnect:student", "admin": "capstoneconnect:admin", "reset": "capstoneconnect:reset",
              "ws": "capstoneconnect:ws"}
 REQUIRED_CLAIMS = ["exp", "iat", "iss", "aud", "sub", "sid", "kind"]
+CLAIMS = frozenset(REQUIRED_CLAIMS)
 LEEWAY_SECONDS = 30
 
 
-def fingerprint(password_hash: str) -> str:
-    return hashlib.sha256(password_hash.encode()).hexdigest()[:16]
-
-
-def encode_token(kind: str, subject_id: str, session_id: str, password_hash: str, lifetime: timedelta,
-                 extra: dict | None = None) -> str:
+def encode_token(kind: str, subject_id: str, session_id: str, lifetime: timedelta) -> str:
     settings = get_settings()
     now = datetime.now(UTC)
-    claims = {
-        **(extra or {}),
-        "iss": settings.jwt_issuer, "aud": AUDIENCES[kind], "sub": subject_id, "sid": session_id,
-        "kind": kind, "pv": fingerprint(password_hash), "iat": now, "exp": now + lifetime,
-    }
+    claims = {"iss": settings.jwt_issuer, "aud": AUDIENCES[kind], "sub": subject_id, "sid": session_id,
+              "kind": kind, "iat": now, "exp": now + lifetime}
     return jwt.encode(claims, settings.secret_key, algorithm=ALGORITHM)
 
 
@@ -97,13 +90,11 @@ def decode_token(token: str, kind: str) -> dict | None:
     now = datetime.now(UTC).timestamp()
     if claims.get("kind") != kind or not isinstance(claims.get("iat"), (int, float)) or claims["iat"] > now + LEEWAY_SECONDS:
         return None
+    if set(claims) != CLAIMS:  # anything extra (a role, an email, an old "pv") is not one of ours
+        return None
     if not all(isinstance(claims.get(k), str) and claims[k] for k in ("sub", "sid")):
         return None
     return claims
-
-
-def token_matches_password(token_fingerprint: str, password_hash: str) -> bool:
-    return secrets.compare_digest(str(token_fingerprint or ""), fingerprint(password_hash))
 
 
 def hash_code(code: str) -> str:

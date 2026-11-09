@@ -137,7 +137,7 @@ def verify_code(db: Session, phone: str, code: str) -> str:
     if spent is None:
         db.commit()
         raise AppError(WRONG_CODE, 400)
-    token = sessions.start(db, "reset", user.id, user.password_hash, timedelta(minutes=settings.reset_token_minutes))
+    token = sessions.start(db, "reset", user.id, timedelta(minutes=settings.reset_token_minutes))
     db.commit()
     return token
 
@@ -146,7 +146,7 @@ def reset_password(db: Session, token: str, password: str) -> User:
     # Checked before the grant is spent, so a weak password doesn't use it up.
     claims_user = sessions.resolve(db, token, "reset")
     user = db.get(User, claims_user[0]) if claims_user else None
-    if user is None or not sessions.check_password(claims_user[2], user.password_hash):
+    if user is None:
         raise AppError("This reset link has expired. Start again.", 400)
     bans.ensure_can_sign_in(db, user)
     ensure_good_password(password, user.phone)

@@ -1,8 +1,8 @@
 """Admin portal: admin accounts and sign-in, the audit log, and operations on site data.
 
-Admin sessions are a signed cookie (ADMIN_COOKIE_NAME, kind "admin"), separate from students'
-cookie. Like students' sessions they carry a fingerprint of the password, so changing an admin's
-password signs that admin out everywhere; deactivating an admin does the same on the next request.
+Admin sessions are a short access cookie (ADMIN_COOKIE_NAME, kind "admin") and a rotating refresh
+cookie, separate from students'. Changing an admin's password revokes every session row of that
+admin (signed out everywhere); deactivating an admin does the same on the next request.
 """
 
 import logging

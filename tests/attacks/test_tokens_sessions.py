@@ -13,11 +13,10 @@ from starlette.websockets import WebSocketDisconnect
 from app.config import Settings, get_settings
 from app.db import SessionLocal
 from app.main import app
-from app.models import AdminUser, AuthSession, User
-from app.security import AUDIENCES, fingerprint
+from app.models import AdminUser, AuthSession
+from app.security import AUDIENCES
 from app.services import sessions
-from tests.conftest import ADMIN_PASSWORD, PASSWORD, PHONES
-from tests.conftest import ws_connect
+from tests.conftest import ADMIN_PASSWORD, PASSWORD, PHONES, ws_connect
 
 LEAD = "usr_1"
 
@@ -25,18 +24,15 @@ LEAD = "usr_1"
 def _row(kind: str, subject: str) -> str:
     """A live session row for this subject; returns its id."""
     with SessionLocal() as db:
-        password_hash = (db.get(User, subject) or db.get(AdminUser, subject)).password_hash
-        token = sessions.start(db, kind, subject, password_hash, timedelta(hours=1))
+        token = sessions.start(db, kind, subject, timedelta(hours=1))
         db.commit()
     return jwt.decode(token, options={"verify_signature": False})["sid"]
 
 
 def _claims(token_kind: str, subject: str, /, **override) -> dict:
     now = datetime.now(UTC)
-    with SessionLocal() as db:
-        password_hash = (db.get(User, subject) or db.get(AdminUser, subject)).password_hash
     claims = {"iss": get_settings().jwt_issuer, "aud": AUDIENCES[token_kind], "sub": subject, "sid": _row(token_kind, subject),
-              "kind": token_kind, "pv": fingerprint(password_hash), "iat": now, "exp": now + timedelta(hours=1)}
+              "kind": token_kind, "iat": now, "exp": now + timedelta(minutes=15)}
     claims.update(override)
     return {k: v for k, v in claims.items() if v is not None}
 
@@ -88,7 +84,10 @@ def _forgeries() -> dict[str, str]:
         "unknown sid": _sign(_claims("student", LEAD, sid="ses_" + "0" * 32)),
         "sid of someone else": _sign(_claims("student", LEAD, sid=_row("student", "usr_2"))),
         "a reset grant's row": _sign(_claims("student", LEAD, sid=_row("reset", LEAD))),
-        "old password fingerprint": _sign(_claims("student", LEAD, pv="0" * 16)),
+        # Exactly the seven claims (B1): anything extra is not a token this API issued.
+        "extra claim: old password fingerprint": _sign(_claims("student", LEAD, pv="0" * 16)),
+        "extra claim: role": _sign(_claims("student", LEAD, role="admin")),
+        "extra claim: phone": _sign(_claims("student", LEAD, phone="+919876543210")),
         "garbage": "not.a.token",
         "huge": "a" * 5000,
     }
@@ -98,7 +97,7 @@ FORGERY_NAMES = [
     "alg none", "alg None, no dot", "HS512", "HS384", "wrong key", "another 32-character key", "tampered payload",
     "tampered signature", "admin audience", "reset audience", "no audience", "wrong issuer", "no issuer", "no exp",
     "expired", "no iat", "iat in the future", "wrong kind", "no sid", "unknown sid", "sid of someone else",
-    "a reset grant's row", "old password fingerprint", "garbage", "huge",
+    "a reset grant's row", "extra claim: old password fingerprint", "extra claim: role", "extra claim: phone", "garbage", "huge",
 ]
 
 
@@ -299,8 +298,10 @@ def test_admin_deactivation_and_password_change_end_sessions(admin_client):
 
 def test_session_cookies_are_httponly_samesite_and_host_only():
     r = TestClient(app).post("/api/auth/login", json={"phone": PHONES[LEAD], "password": PASSWORD})
-    cookie = r.headers["set-cookie"].lower()
-    assert "httponly" in cookie and "samesite=lax" in cookie and "path=/" in cookie and "domain=" not in cookie
+    cookies = r.headers.get_list("set-cookie")
+    assert len(cookies) == 2  # the access token and the refresh token
+    for cookie in map(str.lower, cookies):
+        assert "httponly" in cookie and "samesite=lax" in cookie and "path=/" in cookie and "domain=" not in cookie
 
 
 def test_secure_cookies_use_the_host_prefix(monkeypatch, admin_client):
@@ -308,11 +309,12 @@ def test_secure_cookies_use_the_host_prefix(monkeypatch, admin_client):
     monkeypatch.setattr(s, "cookie_secure", True)
     https = TestClient(app, base_url="https://testserver")
     r = https.post("/api/auth/login", json={"phone": PHONES[LEAD], "password": PASSWORD})
-    assert r.headers["set-cookie"].startswith(f"__Host-{s.cookie_name}=")
-    assert "; secure" in r.headers["set-cookie"].lower()
+    cookies = r.headers.get_list("set-cookie")
+    assert {c.split("=", 1)[0] for c in cookies} == {f"__Host-{s.cookie_name}", f"__Host-{s.refresh_cookie_name}"}
+    assert all("; secure" in c.lower() for c in cookies)
     assert https.get("/api/auth/me").status_code == 200
     # The unprefixed name (which a subdomain or plain-http page could plant) is not read.
-    token = r.headers["set-cookie"].split(";")[0].split("=", 1)[1]
+    token = next(c for c in r.headers.get_list("set-cookie") if c.startswith("__Host-cc_session")).split(";")[0].split("=", 1)[1]
     planted = TestClient(app, base_url="https://testserver")
     planted.cookies.set(s.cookie_name, token)
     assert planted.get("/api/auth/me").status_code == 401

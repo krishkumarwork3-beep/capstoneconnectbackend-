@@ -192,6 +192,20 @@ class Announcement(Base):
     updated_at: Mapped[datetime] = _now_column(onupdate=utcnow)
 
 
+class RefreshToken(Base):
+    """A refresh token of one sign-in (`session_id`, the token family). Only the SHA-256 of the
+    token is stored. Each use spends it (`used_at`) and issues the next one; presenting a spent
+    one again (a stolen copy, replayed) ends the whole session at once (B2)."""
+
+    __tablename__ = "refresh_tokens"
+    __table_args__ = (Index("ix_refresh_tokens_session", "session_id"),)
+
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(40))
+    created_at: Mapped[datetime] = _now_column()
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class SocketTicket(Base):
     """A one-time ticket for opening the live socket (POST /api/realtime/ticket). Only the SHA-256
     of the ticket is stored: the ticket itself is 256 random bits that exist only in the answer

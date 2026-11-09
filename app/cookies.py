@@ -58,3 +58,34 @@ def student_cookie() -> str:
 def admin_cookie() -> str:
     name = get_settings().admin_cookie_name
     return f"__Host-{name}" if can_use_host_prefix() else name
+
+
+def refresh_cookie() -> str:
+    name = get_settings().refresh_cookie_name
+    return f"__Host-{name}" if can_use_host_prefix() else name
+
+
+def admin_refresh_cookie() -> str:
+    name = get_settings().admin_refresh_cookie_name
+    return f"__Host-{name}" if can_use_host_prefix() else name
+
+
+def set_sign_in_cookies(response: Response, kind: str, access: str, refresh: str | None, refresh_max_age: int) -> None:
+    """The short access token (ACCESS_TOKEN_MINUTES) and, when one was issued, the refresh token
+    (until the session's absolute end). Both HttpOnly, Secure (in production), SameSite, __Host-."""
+    access_name, refresh_name = (student_cookie(), refresh_cookie()) if kind == "student" else (admin_cookie(), admin_refresh_cookie())
+    set_session_cookie(response, access_name, access, get_settings().access_token_minutes * 60)
+    if refresh:
+        set_session_cookie(response, refresh_name, refresh, max(0, refresh_max_age))
+
+
+def clear_sign_in_cookies(response: Response, kind: str) -> None:
+    for name in ((student_cookie(), refresh_cookie()) if kind == "student" else (admin_cookie(), admin_refresh_cookie())):
+        clear_session_cookie(response, name)
+
+
+def all_session_cookie_names() -> set[str]:
+    """Every cookie that signs someone in (the CSRF check in app.guard looks for any of them)."""
+    s = get_settings()
+    names = {s.cookie_name, s.admin_cookie_name, s.refresh_cookie_name, s.admin_refresh_cookie_name}
+    return names | {f"__Host-{n}" for n in names}
