@@ -43,3 +43,17 @@ what covers each class and which test proves it.
 - [ ] DoS / resource exhaustion: cap concurrent WebSocket upgrades per IP and total open sockets at the load balancer.
 - [ ] API abuse: bot-management or rate rules on `/api/ws` upgrades and `/api/realtime/ticket` per IP.
 - [ ] Brute force: edge rate rules on the sign-in and reset endpoints that also cover requests arriving just before a socket is opened.
+
+## Privacy, sessions and encryption (since the 2026-11 round)
+- [ ] A new list endpoint: `CurrentUser`, `limit` <= `reads.PAGE_MAX`, an opaque cursor (`reads.make_cursor`), a read budget (`reads.page_read`), no global total for students.
+- [ ] A new route reachable without a session: justify it in `ANONYMOUS_ALLOWED` (tests/attacks/test_route_inventory.py) or it fails.
+- [ ] A new personal free-text or contact column: `EncryptedField` (app/encrypted.py) and a row in SECURITY.md "Field encryption"; lookups through a blind index, never `column == value`.
+- [ ] Production env: `FIELD_ENCRYPTION_KEYS` and `BLIND_INDEX_KEY` set from the secrets manager, different from each other and from `SECRET_KEY` (`python -m app.check_config` exits 0).
+- [ ] Rotating a field key: new key first, `python -m app.admin_cli rotate-keys`, then drop the old one.
+- [ ] Site/portal production builds with an https:// API URL (the build refuses http:// off localhost).
+
+## Deployment items still to do later (not in code)
+- [ ] TLS certificates, HTTP-to-HTTPS redirects, HSTS preload.
+- [ ] WAF / bot rules, CDN, edge rate limiting.
+- [ ] Secrets manager / KMS for SECRET_KEY, FIELD_ENCRYPTION_KEYS, BLIND_INDEX_KEY (with backups).
+- [ ] Database, disk, backup and upload-bucket encryption at rest; DNS hardening.

@@ -128,3 +128,55 @@ site's client `lib/realtime/`). Tests: `tests/attacks/test_ws_*.py` and `test_we
 | Database credentials and transport | A least-privilege PostgreSQL role; `DATABASE_URL=…?sslmode=require` when the database is remote. |
 | Secrets | From the host's secret store, never in the image; rotate `SECRET_KEY` to sign everyone out. |
 | Backups | `scripts/db_backup.py` on a schedule (see DEPLOY.md). |
+
+## Field encryption (AES-256-GCM at rest)
+
+`app/crypto.py`, `app/encrypted.py`. Keys come only from `FIELD_ENCRYPTION_KEYS` (versioned, the first
+encrypts) and a separate `BLIND_INDEX_KEY`; `app.check_config` refuses missing, malformed,
+development or reused keys in production. Each value has a random 96-bit nonce and AAD bound to
+table, column and row id; decryption fails closed. Rotation: `python -m app.admin_cli rotate-keys`.
+This protects a stolen database dump or backup; it is not end-to-end encryption (the API decrypts
+to serve its users), and nothing is encrypted in browser code (its key would be public).
+Tests: `tests/attacks/test_field_encryption.py`.
+
+| Column | Encrypted | Why / how it is still used |
+| --- | --- | --- |
+| `users.phone`, `users.phone_normalized` | Yes | Personal contact data. Log-in, sign-up uniqueness and password reset use `users.phone_hash` (HMAC-SHA256 blind index, unique). Admin search finds whole numbers only. |
+| `banned_phones.phone`, `banned_phones.phone_normalized` | Yes | Personal data. The blind index `phone_hash` is the primary key; blocking/unblocking and sign-up checks match by it. |
+| `messages.text` | Yes | Private chat content. Never searched in SQL. |
+| `conversations.last_message_text` | Yes | A copy of the latest message (the chat list preview). |
+| `reports.snapshot`, `reports.details` | Yes | Copies of reported messages and what the reporter wrote. |
+| `rate_limits.key`, `login_lockouts.key` | Not stored | Keys use the phone's blind index, never the number. |
+| `audit_log.summary`, `audit_log.detail` | No (masked) | Admin search runs over it; phone numbers are written masked (`+91 98••• ••210`). |
+| `users.name`, `college`, `department`, `bio`, `skills`, `github_url`, `passing_year` | No | Profile data shown to every signed-in student and searched by Discover; encrypting it would protect nothing from the API's own users and break search. |
+| `users.password_hash`, `password_reset_codes.code_hash` | No (already one-way) | bcrypt / keyed hash. |
+| `admin_users.email` | No | Admin sign-in looks it up; admin accounts are staff, not students. |
+| Uploaded files (avatars, résumés, attachments) | No (in code) | Served only to signed-in, authorized users; at-rest encryption of the storage bucket/disk is a deployment item. |
+| Realtime events (PostgreSQL NOTIFY payloads) | No | In-memory, never stored. |
+
+## Privacy, anti-scraping, sessions and transport (2026-11 round)
+
+| Class | Covered by | Tests |
+| --- | --- | --- |
+| Visitors get no aggregates or user data (A1) | `GET /api/stats/signups` needs a signed-in student or admin (`Cache-Control: private, no-store`, limited per account); no global totals in student lists; groups list and every upload need a session; the site renders the total only when signed in (no request, no HTML for visitors); the demo mock API is aliased out of real-backend bundles | `test_stats.py`, `test_route_inventory.py::test_every_route_refuses_anonymous_callers_except_the_allowlist`, `test_scraping.py`, e2e "visitors: the landing, log-in and sign-up pages carry no sign-up count…", `check-bundle-secrets.mjs` ("demo mock data") |
+| People, group and chat data need a sign-in; per-object authorization (A2) | `CurrentUser` everywhere but the commented allowlist; per-object checks on HTTP and on every socket frame; someone else's conversation, attachment or request answers 404 like a missing one | `test_scraping.py`, `test_access.py`, `test_ws_access.py` |
+| Scraping (A3) | Pages capped (20 default, 50 max); opaque signed cursors bound to account and list, 30 min; searches need 2 characters, wildcards literal; per-account read budgets (`READ_LIMIT_*`); suspicious reading (many distinct profiles, deep paging) is audited (`security.suspicious_read`, admin Audit page) and throttles reads; random ids; `X-Robots-Tag: noindex`, `robots.txt`, `Cache-Control: no-store` on the API | `test_scraping.py`, `test_abuse.py::test_page_sizes_are_capped`, `test_injection.py::test_like_wildcards_are_matched_literally` |
+| Transport, code side (A4) | Secure + `__Host-` cookies; HSTS (1 year, subdomains) from the API, the site and the portal when served over HTTPS; `upgrade-insecure-requests`; production builds of the site and portal refuse http:// / ws:// URLs off localhost; the socket URL is derived wss:// from https://; tokens in query strings are never read | `test_production.py`, `tests/unit/transport.test.ts` (site, portal), `test_ws_sessions.py::test_a_token_in_the_query_string_is_never_read`, `test_refresh.py` |
+| Field encryption (A5) | See "Field encryption" below | `test_field_encryption.py` |
+| Short access token (B1) | Session cookie = JWT of exactly iss/aud/sub/sid/kind/iat/exp, `ACCESS_TOKEN_MINUTES` (<= 15); any extra claim is refused; roles are read from the database | `test_refresh.py::test_access_token_is_short_and_carries_only_the_seven_claims`, `test_tokens_sessions.py` (forgeries incl. "extra claim: role") |
+| Refresh token (B2) | 256 random bits, opaque, SHA-256 stored (`refresh_tokens`), rotated on every `POST /api/auth/refresh` (admins: `/api/admin/auth/refresh`); a spent token replayed after a 20 s two-tab grace ends the whole session and closes its socket | `test_refresh.py` |
+| Algorithm, claims, secret (B3) | HS256 pinned, exp/iss/aud/iat required and verified, no unverified decode; `app.check_config` refuses a default/weak `SECRET_KEY` | `test_tokens_sessions.py` |
+| Cookies, storage, CSRF (B4) | HttpOnly, Secure, SameSite, `__Host-`; tokens never in a response body or web storage; the CSRF Origin check covers every cookie write including `/refresh` | `test_refresh.py::test_refresh_needs_an_allowed_origin`, `test_no_token_in_web_storage_shape_answers`, `tests/unit/renewal.test.ts` |
+| Logout (B5) | Logout revokes the session and deletes its refresh tokens; sign-out-everywhere and password changes revoke every row; admins follow the same pattern with their own audience | `test_refresh.py`, `test_tokens_sessions.py` |
+| WebSockets (B6) | Hashed one-time ticket, no token in the URL, Origin check, per-message authorization; the socket follows the session row, so it survives renewals and closes on logout, revocation, expiry | `test_ws_*.py`, `test_refresh.py::test_a_replayed_refresh_token_ends_the_session_and_its_socket` |
+| Limits and enumeration (B7) | Log-in limits and lock-outs; `/refresh` limited per address; one generic answer for every refresh failure; log-in and reset answers don't tell which numbers exist. Known: sign-up answers 409 for a registered number (rate limited) | `test_refresh.py::test_refresh_is_rate_limited`, `test_a_refresh_answers_the_same_whatever_is_wrong` |
+
+### Deployment items still to do later
+
+These are outside the code and were deliberately left out of this round:
+- TLS certificates, HTTP-to-HTTPS redirects and HSTS preload submission at the edge.
+- WAF and bot-management rules, CDN configuration and caching rules.
+- Edge rate limiting (per IP, per ASN) in front of the API.
+- A secrets manager or KMS to hold `SECRET_KEY`, `FIELD_ENCRYPTION_KEYS` and `BLIND_INDEX_KEY` (and back them up: losing the field keys loses the encrypted data), with access logging.
+- Database, disk, backup and object-storage (uploads) encryption at rest.
+- DNS hardening (CAA records, DNSSEC).

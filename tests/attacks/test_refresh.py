@@ -205,3 +205,15 @@ def test_no_token_in_web_storage_shape_answers(kind, admin_client):
         if value:
             assert value not in body
     assert "eyJ" not in body
+
+
+def test_tokens_in_the_query_string_are_never_read():
+    """A4/B6: a token in a URL (logged by every proxy) is ignored, for access and refresh alike."""
+    c = _login()
+    access = c.cookies.get(get_settings().cookie_name)
+    refresh = c.cookies.get(get_settings().refresh_cookie_name)
+    anon = TestClient(app)
+    for name in ("access_token", "token", "session", "cc_session", "jwt"):
+        assert anon.get(f"/api/auth/me?{name}={access}").status_code == 401, name
+    for name in ("refresh_token", "refresh", "cc_refresh"):
+        assert anon.post(f"/api/auth/refresh?{name}={refresh}", headers=SITE).status_code == 401, name
