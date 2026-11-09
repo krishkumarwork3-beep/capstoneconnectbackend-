@@ -5,11 +5,12 @@ import json
 
 import pytest
 from sqlalchemy import select
+from starlette.websockets import WebSocketDisconnect
 
 from app.db import SessionLocal
 from app.models import ConversationParticipant
 from app.routers import realtime as ws_routes
-from tests.attacks.ws_tools import drain, frames_until, open_socket
+from tests.attacks.ws_tools import drain, frames_until, open_socket, receive
 
 OTHERS_CHAT = "conv_2"   # usr_1 and usr_2 only
 GROUP_CHAT = "conv_1"    # grp_1: usr_1 (lead), usr_9, usr_11
@@ -52,22 +53,27 @@ def test_unknown_and_existing_conversations_answer_the_same(as_user, kind):
         assert _send(ws, kind, "conv_doesnotexist") == _send(ws, kind, OTHERS_CHAT)
 
 
-def test_removed_from_a_group_mid_session_can_no_longer_use_its_chat(as_user):
+def test_removed_from_a_group_mid_session_has_its_socket_closed_and_hears_nothing(as_user):
     lead, member = as_user("usr_1"), as_user("usr_9")
     with open_socket(lead) as lead_ws, open_socket(member) as ws:
         # Allowed while a member, on this very connection.
         assert _send(ws, "typing", GROUP_CHAT)["type"] == "pong"
         frames_until(lead_ws, "typing", user_id="usr_9")
-        # The lead removes them (HTTP); the socket stays open.
+        # The lead removes them (HTTP): their socket is closed for policy (1008).
         assert lead.delete("/api/groups/grp_1/members/usr_9").status_code in (200, 204)
-        for kind in FRAMES:
-            assert _send(ws, kind, GROUP_CHAT) == {"type": "error", "for": kind, "code": "forbidden"}, kind
-        drain(lead_ws, 0.5)
-        # Nothing they send reaches the group any more, and the group's messages no longer reach them.
+        seen = []
+        try:
+            while True:
+                seen.append(receive(ws, 4))
+        except WebSocketDisconnect as closed:
+            assert closed.code == 1008
+        assert not any(e.get("conversation_id") == GROUP_CHAT for e in seen)
+        # The group goes on; nothing of it reaches the removed member's account any more.
         assert lead.post(f"/api/conversations/{GROUP_CHAT}/messages", json={"text": "after you left"}).status_code == 201
-        heard = drain(ws, 1.0)
-        assert not any(e["type"] == "message.new" and e["message"]["text"] == "after you left" for e in heard)
-        assert not any(e["type"] == "typing" and e.get("user_id") == "usr_9" for e in drain(lead_ws, 0.5))
+        frames_until(lead_ws, "message.new")
+    with open_socket(member) as again:
+        heard = drain(again, 1.0)
+    assert not any(e["type"] == "message.new" and e["message"]["text"] == "after you left" for e in heard)
 
 
 def test_typing_shows_the_current_name_not_one_cached_at_connect(as_user, admin_client):

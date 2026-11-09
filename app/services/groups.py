@@ -17,9 +17,9 @@ from sqlalchemy.orm import Session
 
 from app.errors import AppError, not_found, rule
 from app.models import Group, GroupMember, JoinRequest, Recommendation, User, utcnow
+from app.realtime import publish
 from app.security import new_id
 from app.services import chat
-
 
 # --------------------------------------------------------------------------------------------
 # Lookups
@@ -239,6 +239,8 @@ def remove_member(db: Session, group: Group, actor: User, member_id: str) -> Gro
     group.members.remove(membership)
     db.flush()
     chat.sync_group_chat(db, group)
+    # Their open sockets close (1008) once this commits; see realtime.Connection.push.
+    publish(db, [member_id], {"type": "access.revoked"})
     return group
 
 

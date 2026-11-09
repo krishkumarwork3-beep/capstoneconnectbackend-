@@ -12,7 +12,13 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.routers import realtime as ws_routes
 from tests.attacks import payloads
-from tests.attacks.ws_tools import ErrorRecorder, closed_code, drain, frames_until, open_socket, receive
+from tests.attacks.ws_tools import (
+    ErrorRecorder,
+    closed_code,
+    drain,
+    frames_until,
+    open_socket,
+)
 
 ATTACKER, VICTIM, CONV = "usr_1", "usr_2", "conv_2"  # conv_2: the direct chat of usr_1 and usr_2
 

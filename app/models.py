@@ -192,6 +192,22 @@ class Announcement(Base):
     updated_at: Mapped[datetime] = _now_column(onupdate=utcnow)
 
 
+class SocketTicket(Base):
+    """A one-time ticket for opening the live socket (POST /api/realtime/ticket). Only the SHA-256
+    of the ticket is stored: the ticket itself is 256 random bits that exist only in the answer
+    to the page, so a copy of this table can't be turned back into a working ticket. Spent by
+    setting `used_at` in one atomic UPDATE; bound to the student and the session it was issued to."""
+
+    __tablename__ = "socket_tickets"
+    __table_args__ = (Index("ix_socket_tickets_expires_at", "expires_at"),)
+
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64))
+    session_id: Mapped[str] = mapped_column(String(40))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class AuthSession(Base):
     """One sign-in (a student's or an admin's) or one password-reset grant. The signed cookie only
     names its row (`sid`): logging out, "sign out everywhere", a password change, a suspension or

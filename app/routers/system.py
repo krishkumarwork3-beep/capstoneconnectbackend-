@@ -7,14 +7,14 @@ from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-from app.services import limits as write_limits
 from app import schemas
-from app.deps import DB, CurrentUser, OptionalUser
 from app.config import get_settings
+from app.deps import DB, CurrentUser, OptionalUser
 from app.errors import AppError
 from app.models import utcnow
 from app.services import chat, github, stats
 from app.services import groups as rules
+from app.services import limits as write_limits
 
 router = APIRouter(tags=["system"])
 

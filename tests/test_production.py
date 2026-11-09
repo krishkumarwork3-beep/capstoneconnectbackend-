@@ -324,7 +324,9 @@ def test_health_reports_a_database_outage(client, monkeypatch):
     assert r.status_code == 503 and r.json() == {"status": "unavailable", "database": "down"}
 
 
-def test_security_headers(client):
+def test_security_headers(client, monkeypatch):
+    # The admin portal's origin is configured explicitly (CI has no .env; a developer's may differ).
+    monkeypatch.setattr(get_settings(), "cors_origins", ["http://localhost:3000", "http://localhost:3100"])
     api = client.get("/api/health")
     assert api.headers["x-content-type-options"] == "nosniff"
     assert api.headers["x-frame-options"] == "DENY"

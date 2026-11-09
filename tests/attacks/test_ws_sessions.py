@@ -16,9 +16,13 @@ from app.db import SessionLocal
 from app.main import app
 from app.models import ConversationParticipant
 from app.routers import realtime as ws_routes
-from tests.attacks.ws_tools import ErrorRecorder, closed_code, drain, frames_until, open_socket
-from tests.conftest import PASSWORD, PHONES
-from tests.conftest import ws_connect
+from tests.attacks.ws_tools import (
+    ErrorRecorder,
+    closed_code,
+    frames_until,
+    open_socket,
+)
+from tests.conftest import PASSWORD, PHONES, ws_connect
 
 LEAD = "usr_1"
 
@@ -97,7 +101,7 @@ def test_admin_actions_close_open_sockets(admin_client, action):
             admin.post("/api/admin/banned-phones", json={"phones": [PHONES[LEAD]], "reason": "x"})
         else:
             admin.delete(f"/api/admin/users/{LEAD}")
-        _assert_closed_soon(ws)
+        assert closed_code(ws, timeout=4) == (1008 if action == "block" else 4401)
 
 
 def test_a_revoked_session_is_refused_on_the_next_frame_even_without_the_push(as_user, monkeypatch):

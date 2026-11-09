@@ -34,4 +34,4 @@ package = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q -p no:logging"  # the suite checks the app's own log handlers; pytest's capture handlers would sit beside them

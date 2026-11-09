@@ -88,6 +88,11 @@ class Connection:
             if event.get("sid") == self.session_id:
                 self.close(4401, "Your session ended")
             return
+        if event.get("type") == "access.revoked":
+            # Removed from a group by its lead: every socket of theirs closes (policy), nothing of
+            # that conversation reaches them again, and the reconnect starts from a fresh list.
+            self.close(1008, "Removed from a conversation")
+            return
         if self.closing:
             return
         try:
@@ -114,8 +119,9 @@ class Connection:
                 self.close(1013, "Too slow")
                 return
             if event.get("type") == "session.ended":
-                # Suspended, blocked, password reset or deleted: this socket is done.
-                await self.ws.close(code=4401, reason="Your session ended")
+                # Suspended, deleted or password reset (4401), or number blocked (1008): done.
+                code = 1008 if event.get("code") == 1008 else 4401
+                await self.ws.close(code=code, reason="Your session ended")
                 return
 
 

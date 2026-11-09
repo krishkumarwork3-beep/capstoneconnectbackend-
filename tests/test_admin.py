@@ -139,7 +139,7 @@ def test_admin_actions_sign_open_tabs_out_at_once(admin_client, as_user, action)
             event = ws.receive_json()
         with pytest.raises(WebSocketDisconnect) as closed:
             ws.receive_json()
-    assert closed.value.code == 4401
+    assert closed.value.code == (1008 if action == "block" else 4401)  # a blocked number is policy (1008)
     assert student.get("/api/auth/me").status_code in (401, 403)
 
 

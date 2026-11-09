@@ -80,7 +80,7 @@ def test_without_a_headline_the_days_are_added_and_marked_incomplete():
 def test_new_and_old_accounts_get_the_headline_from_one_calendar_request(monkeypatch, created, years):
     seen = []
     _fake(monkeypatch, _calendar("2,299 contributions in the last year", [5] * 42, years), created, seen=seen)
-    profile, total = asyncio.run(github.contributions("krishkumarwork3-beep"))
+    _profile, total = asyncio.run(github.contributions("krishkumarwork3-beep"))
     assert total == github.Total(2299, True)
     calendar = [u for u in seen if u.host == "github.com"]
     assert len(calendar) == 1 and calendar[0].path == "/users/krishkumarwork3-beep/contributions"

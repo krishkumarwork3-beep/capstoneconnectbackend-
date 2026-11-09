@@ -188,10 +188,10 @@ def check_phone_free(db: Session, phone_normalized: str, except_user: str | None
         raise AppError("Another account already uses this phone number", 409)
 
 
-def end_sessions(db: Session, user_ids: Iterable[str]) -> None:
+def end_sessions(db: Session, user_ids: Iterable[str], close_code: int = 4401) -> None:
     """Revokes every session (and reset grant) of these students, and tells their open tabs at
-    once (when `db` commits) that they are signed out."""
-    sessions.end_everything(db, "student", list(user_ids))  # also tells their open sockets
+    once (when `db` commits) that they are signed out. Their sockets close with `close_code`."""
+    sessions.end_everything(db, "student", list(user_ids), close_code)  # also tells their open sockets
 
 
 def ban(db: Session, user: User, reason: str) -> None:
@@ -221,7 +221,7 @@ def block_numbers(db: Session, admin: AdminUser, phones: Iterable[str], reason: 
             added.append(normalized)
     db.flush()
     if added:
-        end_sessions(db, db.scalars(select(User.id).where(User.phone_normalized.in_(added))))
+        end_sessions(db, db.scalars(select(User.id).where(User.phone_normalized.in_(added))), close_code=1008)
     return s.BannedPhoneAdded(added=added, already=already, invalid=invalid)
 
 

@@ -12,6 +12,7 @@ expired and has not been revoked. So:
 - a reset grant is spent with one atomic UPDATE, so it works once even if two requests race.
 """
 
+import hashlib
 import random
 import secrets
 from datetime import UTC, datetime, timedelta
@@ -23,7 +24,7 @@ from sqlalchemy.orm import Session
 from app import realtime
 from app.config import get_settings
 from app.db import SessionLocal
-from app.models import AuthSession
+from app.models import AuthSession, SocketTicket
 from app.security import decode_token, encode_token, token_matches_password
 
 KINDS = ("student", "admin", "reset", "ws")
@@ -102,14 +103,15 @@ def revoke_all(db: Session, kind: str, subject_ids, except_session: str | None =
     db.execute(stmt.values(revoked_at=_now()))
 
 
-def end_everything(db: Session, kind: str, subject_ids) -> None:
+def end_everything(db: Session, kind: str, subject_ids, close_code: int = 4401) -> None:
     """Sessions and, for students, outstanding reset grants (a password change, a suspension...).
     Their live sockets are closed as soon as `db` commits."""
     ids = list(subject_ids)
     revoke_all(db, kind, ids)
     if kind == "student":
         revoke_all(db, "reset", ids)
-        realtime.publish(db, ids, {"type": "session.ended"})
+        # 4401: signed out (suspended, deleted, password changed); 1008: a policy (number blocked).
+        realtime.publish(db, ids, {"type": "session.ended", "code": close_code})
 
 
 _SPEND = text(
@@ -137,22 +139,32 @@ def spend_reset(db: Session, token: str) -> tuple[str, str] | None:
 # ---------------------------------------------------------------------------------------------
 
 _SPEND_TICKET = text(
-    "UPDATE auth_sessions SET revoked_at = now() "
-    "WHERE id = :sid AND kind = 'ws' AND subject_id = :sub AND revoked_at IS NULL AND expires_at > now() "
-    "RETURNING id"
+    "UPDATE socket_tickets SET used_at = now() "
+    "WHERE token_hash = :hash AND user_id = :user AND session_id = :session AND used_at IS NULL AND expires_at > now() "
+    "RETURNING token_hash"
 )
 
 
-def issue_ticket(db: Session, user_id: str, password_hash: str, session_id: str, lifetime: timedelta) -> str:
-    return start(db, "ws", user_id, password_hash, lifetime, extra={"psid": session_id})
+def _ticket_hash(ticket: str) -> str:
+    # A plain SHA-256 is enough: the ticket is 256 random bits, nothing to guess or brute-force.
+    return hashlib.sha256(ticket.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def issue_ticket(db: Session, user_id: str, session_id: str, lifetime: timedelta) -> str:
+    """A fresh random ticket; only its hash is stored. The caller commits."""
+    ticket = secrets.token_urlsafe(32)
+    db.add(SocketTicket(token_hash=_ticket_hash(ticket), user_id=user_id, session_id=session_id, expires_at=_now() + lifetime))
+    if random.random() < 0.01:
+        db.execute(delete(SocketTicket).where(SocketTicket.expires_at < _now() - timedelta(hours=1)))
+    return ticket
 
 
 def spend_ticket(db: Session, ticket: str, user_id: str, session_id: str) -> bool:
     """True once for a live ticket of this student and this session (spent atomically)."""
-    claims = decode_token(ticket, "ws")
-    if claims is None or claims["sub"] != user_id or claims.get("psid") != session_id:
+    if not ticket or len(ticket) > 200:
         return False
-    return db.execute(_SPEND_TICKET, {"sid": claims["sid"], "sub": user_id}).first() is not None
+    params = {"hash": _ticket_hash(ticket), "user": user_id, "session": session_id}
+    return db.execute(_SPEND_TICKET, params).first() is not None
 
 
 def _aware(at: datetime) -> datetime:

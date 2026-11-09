@@ -32,10 +32,8 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass, field
-
-from typing import Annotated, Literal
-
 from datetime import timedelta
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -44,12 +42,12 @@ from starlette.websockets import WebSocketState
 
 from app import realtime
 from app.config import get_settings
-from app.db import SessionLocal
-from app.errors import AppError
-from app.models import Conversation, User, utcnow
 from app.cookies import student_cookie
-from app.guard import allowed_origins
+from app.db import SessionLocal
 from app.deps import DB, CurrentUser
+from app.errors import AppError
+from app.guard import allowed_origins
+from app.models import Conversation, User, utcnow
 from app.services import bans, chat, limits, sessions
 
 log = logging.getLogger("app.realtime")
@@ -466,7 +464,7 @@ def socket_ticket(request: Request, db: DB, user: CurrentUser):
     Single use, only for this session. (Cross-site pages can't get one: this needs the session,
     the request guard refuses other origins, and CORS hides the answer from them.)"""
     limits.per_account(db, "ws_ticket", user.id)
-    ticket = sessions.issue_ticket(db, user.id, user.password_hash, request.state.session_id, timedelta(seconds=TICKET_SECONDS))
+    ticket = sessions.issue_ticket(db, user.id, request.state.session_id, timedelta(seconds=TICKET_SECONDS))
     db.commit()
     return {"ticket": ticket}
 

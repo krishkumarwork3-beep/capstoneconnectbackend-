@@ -3,17 +3,26 @@ session timer, idle/absolute session expiry, per-account frame cap, send timeout
 for chat, inert payloads, and log lines that carry a request id but never a secret."""
 
 import asyncio
+import contextlib
 import json
 import logging
 from datetime import timedelta
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
+from starlette.websockets import WebSocketDisconnect
 
 from app import realtime
 from app.db import SessionLocal
-from app.models import AuthSession, Message, User, utcnow
+from app.models import (
+    AuthSession,
+    ConversationParticipant,
+    Message,
+    SocketTicket,
+    User,
+    utcnow,
+)
 from app.routers import realtime as ws_routes
 from tests.attacks.ws_tools import closed_code, drain, frames_until, open_socket
 
@@ -38,7 +47,10 @@ def _ping_answers(ws) -> list[dict]:
 def test_a_removed_member_gets_nothing_even_from_an_event_that_still_names_them(as_user):
     lead = as_user(LEAD)
     with open_socket(lead) as lead_ws, open_socket(as_user(MEMBER)) as ws:
-        assert lead.delete(f"/api/groups/grp_1/members/{MEMBER}").status_code in (200, 204)
+        with SessionLocal() as db:  # removed without the close push: only the fan-out re-check is left
+            db.execute(delete(ConversationParticipant).where(ConversationParticipant.conversation_id == GROUP_CHAT,
+                                                             ConversationParticipant.user_id == MEMBER))
+            db.commit()
         drain(ws, 0.5)
         drain(lead_ws, 0.3)
         # A stale recipient list (published before the removal committed) still names them.
@@ -133,17 +145,13 @@ def test_ten_sockets_share_one_frame_budget(as_user):
         # 7 frames each: under the 30-per-socket limit, over the account's 60 in all.
         for _ in range(7):
             for ws in sockets:
-                try:
+                with contextlib.suppress(WebSocketDisconnect, RuntimeError):  # already closed by the cap
                     ws.send_text('{"type":"ping"}')
-                except Exception:
-                    pass
         codes = [closed_code(ws, 0.5) for ws in sockets]
     finally:
         for m in managers:
-            try:
+            with contextlib.suppress(WebSocketDisconnect, RuntimeError):
                 m.__exit__(None, None, None)
-            except Exception:
-                pass
     assert 1008 in codes
     assert ws_routes.ACCOUNT_RATE_FRAMES < 10 * ws_routes.RATE_FRAMES
 
@@ -249,3 +257,22 @@ def test_refused_handshakes_and_frames_are_logged_without_secrets(as_user):
     assert "request_id=req42abc" in text and "request_id=req43abc" in text
     for secret in ("SECRET-TICKET-VALUE", "SECRET-BODY", cookie):
         assert secret not in text
+
+
+# Tickets are stored as hashes: a copy of the database can't open a socket ---------------------
+
+def test_a_copy_of_the_ticket_table_cannot_produce_a_working_ticket(as_user):
+    c = as_user(LEAD)
+    ticket = c.post("/api/realtime/ticket").json()["ticket"]
+    with SessionLocal() as db:
+        rows = db.scalars(select(SocketTicket).where(SocketTicket.user_id == LEAD)).all()
+    assert rows and all(ticket not in (r.token_hash, r.user_id, r.session_id) for r in rows)
+    stolen = [r.token_hash for r in rows] + [r.session_id for r in rows]
+    for candidate in stolen:
+        with c.websocket_connect("/api/ws") as ws:
+            ws.send_text(json.dumps({"type": "auth", "ticket": candidate}))
+            assert closed_code(ws) == 4401
+    # The real ticket is still unspent, and works once.
+    with c.websocket_connect("/api/ws") as ws:
+        ws.send_text(json.dumps({"type": "auth", "ticket": ticket}))
+        assert frames_until(ws, "hello")
