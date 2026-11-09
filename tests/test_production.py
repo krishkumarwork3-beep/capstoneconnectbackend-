@@ -100,22 +100,24 @@ def _login(url: str, phone: str, password: str, forwarded_for: str | None = None
 
 
 def test_two_workers_share_the_login_limit():
-    server = Server("--workers", "2", EXPOSE_WORKER_PID="true", LOGIN_LIMIT_PER_IP="500")
+    """Two API processes on one database share the sign-in limit. Two single-worker servers, so
+    each request goes to the process it is sent to: which of `--workers 2` takes a connection is
+    the kernel's choice (on a quiet machine it can hand every one to the same worker)."""
+    env = {"EXPOSE_WORKER_PID": "true", "LOGIN_LIMIT_PER_IP": "500"}
+    one, two = Server(**env), Server(**env)
     try:
-        server.wait()
-        workers = set()
-        for _ in range(40):
-            with httpx.Client(timeout=10) as c:
-                workers.add(c.get(f"{server.url}/api/health", headers={"Connection": "close"}).json()["worker"])
-            if len(workers) > 1:
-                break
-        assert len(workers) == 2, f"requests only reached {workers}"
-        statuses = [_login(server.url, PHONES[OTHER], "wrong-password") for _ in range(5)]
+        one.wait()
+        two.wait()
+        pids = {httpx.get(f"{s.url}/api/health", timeout=10).json()["worker"] for s in (one, two)}
+        assert len(pids) == 2, pids
+        # Five wrong passwords, alternating between the two processes.
+        statuses = [_login((one, two)[i % 2].url, PHONES[OTHER], "wrong-password") for i in range(5)]
         assert statuses == [401] * 5
-        # The sixth attempt is refused whichever worker takes it, and stays refused.
-        assert [_login(server.url, PHONES[OTHER], PASSWORD) for _ in range(4)] == [429] * 4
+        # The sixth attempt is refused whichever process takes it, and stays refused.
+        assert [_login((two, one)[i % 2].url, PHONES[OTHER], PASSWORD) for i in range(4)] == [429] * 4
     finally:
-        server.stop()
+        one.stop()
+        two.stop()
 
 
 def test_forwarded_for_is_believed_only_from_the_trusted_proxy():
