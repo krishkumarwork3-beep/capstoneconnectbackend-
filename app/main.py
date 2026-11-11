@@ -2,27 +2,37 @@
 uploads under /uploads (app.routers.files)."""
 
 import logging
-from pathlib import Path
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
-from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
-from starlette.concurrency import run_in_threadpool
 
-from app import realtime
+from app import log_safety, realtime
 from app.check_config import startup_check
-from app.services.admin import ensure_first_admin
 from app.config import get_settings
 from app.errors import install_error_handlers
-from app import log_safety
 from app.guard import RequestGuardMiddleware
 from app.observability import RequestContextMiddleware, trusted_proxies
-from app.routers import admin, auth, chat, community, files, groups, requests, system, users
+from app.routers import (
+    admin,
+    auth,
+    chat,
+    community,
+    files,
+    groups,
+    requests,
+    system,
+    users,
+)
 from app.routers import realtime as realtime_router
+from app.services.admin import ensure_first_admin
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log_safety.install()  # one line per entry, no control characters, secrets masked
@@ -61,6 +71,20 @@ def swagger_ui():
 def redoc():
     return get_redoc_html(openapi_url=app.openapi_url, title=f"{app.title} - ReDoc",
                           redoc_js_url="/docs-assets/redoc.standalone.js", redoc_favicon_url="data:,", with_google_fonts=False)
+
+
+DOC_PATHS = ("/docs", "/redoc", "/openapi.json")
+
+
+@app.middleware("http")
+async def hide_docs_in_production(request, call_next):
+    """The API's map (every route, every field) is not published by a production server unless
+    API_DOCS_ENABLED=true: 404 as if the routes did not exist."""
+    path = request.url.path
+    settings = get_settings()
+    if settings.app_env == "production" and not settings.api_docs_enabled and (path in DOC_PATHS or path.startswith("/docs-assets/")):
+        return JSONResponse({"message": "Not found"}, status_code=404)
+    return await call_next(request)
 
 
 install_error_handlers(app)

@@ -390,3 +390,15 @@ def test_twilio_without_credentials_is_a_clear_error_not_a_crash(client, monkeyp
     assert called == []
     # An unknown number still gets the usual answer (no SMS is attempted, nothing revealed).
     assert client.post("/api/auth/password/forgot", json={"phone": "+91 90000 00099"}).status_code == 200
+
+
+# --- F6: no API map from a production server ----------------------------------------------------
+
+@pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json", "/docs-assets/swagger-ui.css"])
+def test_api_docs_are_off_in_production_unless_enabled(client, monkeypatch, path):
+    s = get_settings()
+    assert client.get(path).status_code == 200  # development: on (Schemathesis reads /openapi.json)
+    monkeypatch.setattr(s, "app_env", "production")
+    assert client.get(path).status_code == 404
+    monkeypatch.setattr(s, "api_docs_enabled", True)
+    assert client.get(path).status_code == 200

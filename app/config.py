@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     # "production" makes every unsafe setting stop the API at startup (app.check_config), whatever
     # COOKIE_SECURE says; it also turns the API docs off (API_DOCS_ENABLED to keep them).
     app_env: Literal["development", "production"] = "development"
+    # /docs, /redoc and /openapi.json answer 404 when APP_ENV=production unless this is true.
+    api_docs_enabled: bool = False
     cookie_secure: bool = False
     cookie_name: str = "cc_session"
     # "lax" (default) when the site and the API share a site (subdomains of one domain, or one
