@@ -5,7 +5,7 @@
 #
 # On start it applies the database migrations, then serves with 2 workers. Settings come from the
 # environment (see .env.production.example); nothing secret is baked into the image.
-FROM python:3.12-slim AS base
+FROM python:3.12.11-slim-bookworm AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

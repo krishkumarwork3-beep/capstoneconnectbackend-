@@ -194,6 +194,13 @@ def test_check_config_exit_codes():
     {"COOKIE_SECURE": "false"},
     {"SMS_PROVIDER": "console"},
     {"BLIND_INDEX_KEY": DEV_BLIND_INDEX_KEY},
+    # Public addresses: https and not this machine; the Host list explicit.
+    {"CORS_ORIGINS": '["http://app.example.com"]'},
+    {"CORS_ORIGINS": '["https://localhost:3000"]'},
+    {"PUBLIC_BASE_URL": "http://api.example.com"},
+    {"PUBLIC_BASE_URL": "https://127.0.0.1:8000"},
+    {"ALLOWED_HOSTS": "[]"},
+    {"ALLOWED_HOSTS": '["*"]'},
 ])
 def test_the_api_refuses_to_start_unsafe_on_https(override):
     server = Server(**{**SAFE, **override})
@@ -204,6 +211,24 @@ def test_the_api_refuses_to_start_unsafe_on_https(override):
         server.stop()
     assert code != 0
     assert "Unsafe settings for a public server" in output and next(iter(override)) in output
+
+
+def test_production_url_rules_and_the_github_token_warning():
+    from app.check_config import problems
+    from app.config import Settings
+
+    base = dict(app_env="production", cookie_secure=True, cors_origins=["https://app.example.com"],
+                public_base_url="https://api.example.com", allowed_hosts=["api.example.com"])
+    found = problems(Settings(**base, github_token=""))
+    assert ("warning" in {s for s, t in found if "GITHUB_TOKEN" in t}) and not any(
+        s == "fatal" and ("CORS" in t or "PUBLIC_BASE_URL" in t or "ALLOWED_HOSTS" in t) for s, t in found)
+    assert not any("GITHUB_TOKEN" in t for _, t in problems(Settings(**base, github_token="ghp_test")))
+    # The same addresses on a laptop are not production problems.
+    dev = problems(Settings(app_env="development", cors_origins=["http://localhost:3000"], allowed_hosts=[]))
+    assert not any("CORS_ORIGINS must" in t or "ALLOWED_HOSTS" in t for _, t in dev)
+    # A warning alone does not stop check_config (exit 0 with SAFE, which has no GITHUB_TOKEN).
+    result = _check_config(**SAFE)
+    assert result.returncode == 0 and "GITHUB_TOKEN" in result.stdout
 
 
 def test_a_short_secret_key_never_starts():

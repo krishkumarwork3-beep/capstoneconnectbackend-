@@ -149,13 +149,19 @@ def test_opening_the_repositories_panel_returns_the_fresh_total(monkeypatch, lin
     assert answer.status_code == 200 and answer.json()["contributions"] == 2299
 
 
-def test_a_failed_lookup_keeps_the_old_total_and_date(monkeypatch, linked_user):
+@pytest.mark.parametrize("status", [403, 429, 500])
+def test_a_failed_lookup_keeps_the_old_total_and_date(monkeypatch, linked_user, as_user, status):
+    """No GITHUB_TOKEN: GitHub answers 403/429 when the anonymous limit is used up. The stored
+    total is never lowered and the profile still answers 200 (never a 500)."""
     with SessionLocal() as db:
         db.get(User, linked_user[0]).github_contribution_count = 2299
         db.commit()
-    _fake(monkeypatch, "rate limited", status=429)
+    _fake(monkeypatch, "rate limited", status=status)
     asyncio.run(github.sync_user(linked_user[0], True))
     assert _stored(linked_user[0]) == (2299, linked_user[1])
+    answer = as_user("usr_1").get(f"/api/users/{linked_user[0]}/github")
+    assert answer.status_code == 200 and answer.json()["contributions"] == 2299
+    assert _stored(linked_user[0])[0] == 2299
 
 
 def test_a_partial_lookup_never_lowers_a_good_total(monkeypatch, linked_user):

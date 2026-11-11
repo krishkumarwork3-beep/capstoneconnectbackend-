@@ -50,6 +50,34 @@ def problems(settings: Settings) -> list[tuple[str, str]]:
         found.append(("warning", "PUBLIC_BASE_URL is http:// while cookies are Secure: file links would be mixed content"))
     if any(o.startswith("http://") and "localhost" not in o and "127.0.0.1" not in o for o in settings.cors_origins):
         found.append(("warning", "CORS_ORIGINS includes a plain-HTTP origin"))
+    if production:
+        found.extend(_production_url_problems(settings))
+    return found
+
+
+LOCAL_NAMES = ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+
+
+def _is_local_or_http(url: str) -> bool:
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url.strip())
+    return parts.scheme != "https" or (parts.hostname or "") in LOCAL_NAMES or (parts.hostname or "").endswith(".localhost")
+
+
+def _production_url_problems(settings: Settings) -> list[tuple[str, str]]:
+    """APP_ENV=production: the public addresses must be real https ones, the host list explicit."""
+    found: list[tuple[str, str]] = []
+    if not settings.cors_origins or any(_is_local_or_http(o) for o in settings.cors_origins):
+        found.append(("fatal", "CORS_ORIGINS must list only the https:// origins of the site and the portal (no localhost, no http://)"))
+    if _is_local_or_http(settings.public_base_url):
+        found.append(("fatal", "PUBLIC_BASE_URL must be the API's public https:// address (not localhost, not http://)"))
+    hosts = [h.strip() for h in settings.allowed_hosts if h.strip()]
+    if not hosts or "*" in hosts:
+        found.append(("fatal", "ALLOWED_HOSTS must name the API's host names (empty or * accepts any Host header)"))
+    if not settings.github_token:
+        found.append(("warning", "GITHUB_TOKEN is empty: GitHub lookups are anonymous (60 an hour per server address); "
+                                 "stored totals are kept when a lookup is refused"))
     return found
 
 
@@ -102,7 +130,9 @@ def main() -> int:
     for severity, text in found:
         print(f"{'FATAL  ' if severity == 'fatal' else 'warning'}  {text}")
     print(f"\n{len(found)} problem(s). FATAL ones stop the API from starting when COOKIE_SECURE=true.")
-    return 1
+    # Warnings alone (say, no GITHUB_TOKEN) pass; any fatal problem fails (exit 1). The development
+    # defaults (SECRET_KEY, field keys) are fatal, so a laptop's settings still exit 1.
+    return 1 if any(severity == "fatal" for severity, _ in found) else 0
 
 
 if __name__ == "__main__":

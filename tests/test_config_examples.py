@@ -27,9 +27,22 @@ def _keys(path: Path) -> dict[str, str]:
 def test_production_example_documents_every_setting():
     documented = set(_keys(ROOT / ".env.production.example"))
     settings = {name.upper() for name in Settings.model_fields}
-    limits = {n for n in settings if n.startswith(("LOGIN_", "SIGNUP_", "RESET_", "VERIFY_", "OTP_")) or n == "RESET_TOKEN_MINUTES"}
-    missing = settings - documented - INTERNAL - limits - {"COOKIE_NAME", "ADMIN_COOKIE_NAME"}
+    # Every setting, the rate limits and cookie names included (they were exempt before).
+    missing = settings - documented - INTERNAL
     assert not missing, f"settings missing from .env.production.example: {sorted(missing)}"
+    # ...and each one is explained: a comment line in the block right above it.
+    lines = (ROOT / ".env.production.example").read_text(encoding="utf-8").splitlines()
+    unexplained = []
+    for i, line in enumerate(lines):
+        match = re.match(r"^#?\s*([A-Z][A-Z0-9_]+)=", line)
+        if not match:
+            continue
+        j = i - 1
+        while j >= 0 and re.match(r"^#?\s*[A-Z][A-Z0-9_]+=", lines[j]):
+            j -= 1
+        if j < 0 or not lines[j].startswith("#"):
+            unexplained.append(match.group(1))
+    assert not unexplained, f"settings without a comment in .env.production.example: {unexplained}"
     unknown = documented - settings - INFRA
     assert not unknown, f"unknown names in .env.production.example (typos?): {sorted(unknown)}"
     # The development example names only real settings too.
@@ -48,5 +61,8 @@ def test_production_example_passes_check_config_once_filled_in():
     # As the environment loader does: JSON for lists.
     kwargs = {k.lower(): json.loads(v) if v.startswith("[") else v for k, v in values.items() if v != ""}
     settings = Settings(_env_file=None, **kwargs)
-    assert problems(settings) == []
+    # Rewritten to the new contract: no fatal problem; the one allowed warning is the empty
+    # GITHUB_TOKEN (anonymous GitHub lookups), which check_config reports without failing.
+    assert [t for s, t in problems(settings) if s == "fatal"] == []
+    assert all("GITHUB_TOKEN" in t for _, t in problems(settings))
     assert settings.cookie_secure and settings.cookie_samesite == "lax" and not settings.allow_dev_code and not settings.demo_login

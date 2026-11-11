@@ -8,7 +8,7 @@
 # instead; this file is only for running both yourself.
 services:
   db:
-    image: postgres:16
+    image: postgres:16.9
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-capstoneconnect}
