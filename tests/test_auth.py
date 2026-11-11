@@ -21,10 +21,26 @@ def test_signup_signs_in_and_cleans_input(client):
     assert client.get("/api/auth/me").json()["id"] == user["id"]
 
 
-def test_signup_rejects_a_used_phone_in_any_format(client):
-    assert client.post("/api/auth/signup", json={**NEW, "phone": "9876543210"}).json()["message"] == (
-        "An account already exists for this phone number"
-    )
+def test_signup_for_a_used_phone_looks_like_a_new_account_and_texts_the_owner(client, monkeypatch):
+    # Rewritten to the new contract: no 409 (that told anyone which numbers have an account).
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+    from app.routers import auth as auth_router
+
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(auth_router, "send_sms", lambda to, body: sent.append((to, body)))
+    fresh = TestClient(app).post("/api/auth/signup", json={**NEW, "phone": "+91 99999 44444"})
+    for written in ("9876543210", "+91 98765 43210"):
+        used = client.post("/api/auth/signup", json={**NEW, "phone": written})
+        assert used.status_code == fresh.status_code == 201, used.text
+        assert set(used.json()) == set(fresh.json())
+        assert "already" not in used.text.lower()
+        # Nobody is signed in to the existing account, and nothing new was stored.
+        assert not any(c for c in used.cookies)
+        assert client.get(f"/api/users/{used.json()['id']}").status_code in (401, 404)
+    assert [to for to, _ in sent] == ["+919876543210", "+919876543210"]
+    assert "already have one" in sent[0][1]
 
 
 def test_signup_needs_a_long_password(client):

@@ -94,7 +94,7 @@ def test_signup_and_reset_steps_are_throttled(client, monkeypatch):
     monkeypatch.setattr(settings, "signup_limit_per_ip", 2)
     body = {"name": "A", "college": "B", "passing_year": 2027, "password": "long-enough-1"}
     assert client.post("/api/auth/signup", json={**body, "phone": "+91 90000 11001"}).status_code == 201
-    assert client.post("/api/auth/signup", json={**body, "phone": "+91 90000 11001"}).status_code == 409
+    assert client.post("/api/auth/signup", json={**body, "phone": "+91 90000 11001"}).status_code == 201  # rewritten: a registered number answers like a new one (no 409)
     assert client.post("/api/auth/signup", json={**body, "phone": "+91 90000 11002"}).status_code == 429
 
     monkeypatch.setattr(settings, "verify_limit_per_phone", 2)
@@ -170,6 +170,8 @@ def test_avatars_and_resumes_need_a_sign_in(as_user, client):
     assert guest.get(_path(avatar)).status_code == 401  # visitors get no photos either
     r = as_user(LEAD).get(_path(avatar))
     assert r.status_code == 200 and r.headers["content-type"] == "image/png" and r.headers["x-content-type-options"] == "nosniff"
+    # Revalidated every time: after signing out, a shared computer's cache does not show the photo.
+    assert r.headers["cache-control"] == "private, no-cache"
     assert guest.get(_path(resume)).status_code == 401
     r = as_user(LEAD).get(_path(resume))
     assert r.status_code == 200 and r.content == PDF and "no-store" in r.headers["cache-control"]

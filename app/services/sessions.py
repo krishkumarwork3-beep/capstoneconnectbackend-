@@ -84,7 +84,8 @@ def sign_in(db: Session, kind: str, subject_id: str, lifetime: timedelta, reques
 # A refresh token spent this recently is still accepted once more (two tabs refreshing at the same
 # moment both send the old cookie): the second gets a fresh access token but no new refresh token.
 # Older than this, a spent token is a replay and ends the session.
-REUSE_GRACE = timedelta(seconds=20)
+def reuse_grace() -> timedelta:
+    return timedelta(seconds=get_settings().refresh_reuse_grace_seconds)
 
 
 class Refreshed(NamedTuple):
@@ -108,7 +109,7 @@ def refresh(db: Session, token: str | None, kind: str) -> Refreshed | None:
     if session is None or session.kind != kind or session.revoked_at is not None or _aware(session.expires_at) <= _now():
         return None
     if row.used_at is not None:
-        if _now() - _aware(row.used_at) > REUSE_GRACE:
+        if _now() - _aware(row.used_at) > reuse_grace():
             end_family(db, session)  # a stolen, replayed token: nobody keeps this session
             return None
         new_refresh = None

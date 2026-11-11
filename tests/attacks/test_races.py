@@ -135,7 +135,9 @@ def test_deleting_a_group_while_people_join():
 def test_signing_up_twice_at_once():
     body = {"name": "Twin", "college": "X", "passing_year": 2027, "phone": "+91 90000 33333", "password": "twin-pass-long-1"}
     results = _at_once([lambda: TestClient(app).post("/api/auth/signup", json=body) for _ in range(N)])
-    assert results.count(201) == 1 and set(results) <= {201, 409, 429}, results
+    # Rewritten to the new contract: the losers get the same 201 as the winner (no 409 enumeration);
+    # exactly one account is stored (checked below).
+    assert set(results) <= {201, 429} and 201 in results, results
     with SessionLocal() as db:
         assert db.scalar(select(func.count()).select_from(User).where(User.phone_hash == crypto.phone_hash("919000033333"))) == 1
 

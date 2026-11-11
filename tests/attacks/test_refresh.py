@@ -103,6 +103,18 @@ def test_two_tabs_refreshing_at_once_do_not_sign_the_student_out():
     assert c.get("/api/auth/me").status_code == 200
 
 
+def test_the_two_tab_grace_is_five_seconds_and_a_setting():
+    assert get_settings().refresh_reuse_grace_seconds == 5
+    c = _login()
+    old = _cookie(c, get_settings().refresh_cookie_name)
+    assert _refresh(c).status_code == 204
+    _age_spent_tokens(6)  # just past the grace: a replay, which ends the session everywhere
+    late = TestClient(app)
+    late.cookies.set(get_settings().refresh_cookie_name, old)
+    assert _refresh(late).status_code == 401
+    assert c.get("/api/auth/me").status_code == 401
+
+
 def test_logout_deletes_the_refresh_tokens_and_the_session():
     c = _login()
     token = _cookie(c, get_settings().refresh_cookie_name)

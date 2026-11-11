@@ -4,6 +4,7 @@ Sign-in, sign-up and every password-reset step are throttled per phone number an
 address (app.services.limits).
 """
 
+import logging
 from datetime import timedelta
 
 from fastapi import APIRouter, BackgroundTasks, Request, Response
@@ -23,11 +24,13 @@ from app.deps import DB, CurrentUser, OptionalUser, PathId
 from app.errors import AppError
 from app.models import User, utcnow
 from app.passwords import ensure_good_password
-from app.security import hash_password, new_id, normalize_phone, verify_password
+from app.security import e164, hash_password, new_id, normalize_phone, verify_password
 from app.serializers import user_out
 from app.services import admin as admin_ops
 from app.services import bans, github, limits, lockout, password_reset, sessions
+from app.services.sms import SmsError, send_sms
 
+log = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 # Checked against when the number has no account, so a wrong number takes as long as a wrong
@@ -93,11 +96,26 @@ def signup(payload: schemas.SignupIn, request: Request, response: Response, back
         raise AppError("Enter a valid phone number", 422)
     ensure_good_password(payload.password, payload.phone)
     bans.ensure_number_allowed(db, phone)
-    if db.scalar(select(User.id).where(User.phone_hash == crypto.phone_hash(phone))):
-        raise AppError("An account already exists for this phone number", 409)
-
     github_username = github.username_from(payload.github_url)
-    user = User(
+    if db.scalar(select(User.id).where(User.phone_hash == crypto.phone_hash(phone))):
+        return _already_registered(payload, phone, github_username, background)
+
+    user = _new_user(payload, phone, github_username)
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return _already_registered(payload, phone, github_username, background)
+
+    if github_username:
+        background.add_task(github.sync_user, user.id)
+    _start_session(request, response, db, user)
+    return user_out(user)
+
+
+def _new_user(payload: schemas.SignupIn, phone: str, github_username: str | None) -> User:
+    return User(
         id=new_id("usr"),
         name=payload.name.strip(),
         college=payload.college.strip(),
@@ -111,17 +129,24 @@ def signup(payload: schemas.SignupIn, request: Request, response: Response, back
         github_url=f"https://github.com/{github_username}" if github_username else None,
         last_seen=utcnow(),
     )
-    db.add(user)
-    try:
-        db.commit()
-    except IntegrityError as exc:
-        db.rollback()
-        raise AppError("An account already exists for this phone number", 409) from exc
 
-    if github_username:
-        background.add_task(github.sync_user, user.id)
-    _start_session(request, response, db, user)
-    return user_out(user)
+
+def _already_registered(payload: schemas.SignupIn, phone: str, github_username: str | None,
+                        background: BackgroundTasks) -> dict:
+    """No enumeration: a registered number gets the same 201 and body shape as a new account (a
+    profile that is never stored, and no session), after the same password-hashing work. The owner
+    is told by SMS instead, so a forgotten account is still found."""
+    decoy = _new_user(payload, phone, github_username)
+    background.add_task(_tell_owner, phone)
+    return user_out(decoy)
+
+
+def _tell_owner(phone: str) -> None:
+    try:
+        send_sms(e164(phone), "Someone tried to create a CapstoneConnect account with this number. "
+                              "You already have one: sign in, or reset your password if you forgot it.")
+    except SmsError as exc:
+        log.error("Already-registered SMS failed: %s", exc)
 
 
 @router.post("/login", response_model=schemas.UserOut)

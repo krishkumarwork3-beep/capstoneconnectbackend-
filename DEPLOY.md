@@ -122,6 +122,13 @@ fetched in the browser.
 | API (enforced, by content type) | the same: photo 2 MB PNG/JPG, résumé 5 MB PDF, attachment 5 MB PDF/PNG/JPG/DOCX/ZIP |
 | Reverse proxy / host | must allow at least **6 MB** request bodies: **nginx defaults to 1 MB** (`client_max_body_size 6m;`), Cloudflare's free plan allows 100 MB, Render/Railway/Fly have no small default, Vercel functions 4.5 MB (the API is not on Vercel, so this doesn't apply) |
 
+### WebSocket limits are per process
+
+The live-socket limits (`WS_MAX_SOCKETS`, and `WS_ACCOUNT_FRAMES` frames per account in 10 s) are
+counted by each API worker on its own. With `WEB_CONCURRENCY=2` an account can send up to
+2 x `WS_ACCOUNT_FRAMES` frames in 10 s in all (one socket per worker). Lower `WS_ACCOUNT_FRAMES`
+if you run many workers.
+
 ## 7. Smoke test after deploying
 
 - [ ] `https://api.example.com/api/health` → `{"status":"ok","database":"ok"}`

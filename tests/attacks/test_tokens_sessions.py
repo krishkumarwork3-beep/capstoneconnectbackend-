@@ -296,12 +296,20 @@ def test_admin_deactivation_and_password_change_end_sessions(admin_client):
 # --- Cookies -----------------------------------------------------------------------------------
 
 
-def test_session_cookies_are_httponly_samesite_and_host_only():
+def test_session_cookies_are_httponly_samesite_and_host_only(admin_client):
     r = TestClient(app).post("/api/auth/login", json={"phone": PHONES[LEAD], "password": PASSWORD})
     cookies = r.headers.get_list("set-cookie")
     assert len(cookies) == 2  # the access token and the refresh token
     for cookie in map(str.lower, cookies):
-        assert "httponly" in cookie and "samesite=lax" in cookie and "path=/" in cookie and "domain=" not in cookie
+        assert "httponly" in cookie and "samesite=lax" in cookie and "domain=" not in cookie
+    # Rewritten to the new contract: the refresh cookie is scoped to the sign-in endpoints.
+    paths = {c.split("=", 1)[0]: c.lower().split("path=")[1].split(";")[0] for c in cookies}
+    s = get_settings()
+    assert paths == {s.cookie_name: "/", s.refresh_cookie_name: "/api/auth"}
+    admin_client()  # creates admin0@example.com
+    a = TestClient(app).post("/api/admin/auth/login", json={"email": "admin0@example.com", "password": ADMIN_PASSWORD})
+    admin_paths = {c.split("=", 1)[0]: c.lower().split("path=")[1].split(";")[0] for c in a.headers.get_list("set-cookie")}
+    assert admin_paths == {s.admin_cookie_name: "/", s.admin_refresh_cookie_name: "/api/admin/auth"}
 
 
 def test_secure_cookies_use_the_host_prefix(monkeypatch, admin_client):
@@ -310,8 +318,10 @@ def test_secure_cookies_use_the_host_prefix(monkeypatch, admin_client):
     https = TestClient(app, base_url="https://testserver")
     r = https.post("/api/auth/login", json={"phone": PHONES[LEAD], "password": PASSWORD})
     cookies = r.headers.get_list("set-cookie")
-    assert {c.split("=", 1)[0] for c in cookies} == {f"__Host-{s.cookie_name}", f"__Host-{s.refresh_cookie_name}"}
-    assert all("; secure" in c.lower() for c in cookies)
+    # Rewritten to the new contract: the access cookie keeps `__Host-` (Path=/); the refresh cookie,
+    # scoped to /api/auth, is `__Secure-` (same Secure + no-Domain conditions).
+    assert {c.split("=", 1)[0] for c in cookies} == {f"__Host-{s.cookie_name}", f"__Secure-{s.refresh_cookie_name}"}
+    assert all("; secure" in c.lower() and "domain=" not in c.lower() for c in cookies)
     assert https.get("/api/auth/me").status_code == 200
     # The unprefixed name (which a subdomain or plain-http page could plant) is not read.
     token = next(c for c in r.headers.get_list("set-cookie") if c.startswith("__Host-cc_session")).split(";")[0].split("=", 1)[1]

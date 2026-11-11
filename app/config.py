@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     access_token_minutes: int = Field(default=15, ge=1, le=15)
     refresh_cookie_name: str = "cc_refresh"
     admin_refresh_cookie_name: str = "cc_admin_refresh"
+    # A spent refresh token is accepted once more within this many seconds (two tabs renewing at
+    # the same moment; the second gets no new refresh token). Later, it is a replay and ends the
+    # session everywhere.
+    refresh_reuse_grace_seconds: int = Field(default=5, ge=0, le=30)
     # A sign-in unused this long ends (sliding); none outlives SESSION_MAX_DAYS from sign-in,
     # whatever its expires_at says (absolute). Both enforced for HTTP and the live socket.
     session_idle_days: int = Field(default=7, ge=1)
@@ -87,6 +91,9 @@ class Settings(BaseSettings):
     db_statement_timeout_ms: int = Field(default=15_000, ge=100, le=600_000)
     # Live sockets one API process holds at most (each account: 10).
     ws_max_sockets: int = Field(default=2_000, ge=1)
+    # Frames one account may send across its sockets in 10 seconds, per API process: the
+    # effective cap is (worker processes x this), since each process counts on its own.
+    ws_account_frames: int = Field(default=60, ge=1)
     # Tests only: /api/health also reports which worker process answered.
     expose_worker_pid: bool = False
 

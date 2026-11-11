@@ -64,7 +64,7 @@ IDLE_SECONDS = 90
 MAX_SOCKETS_PER_USER = 10
 # Per account, across all its sockets in this process: at most this many frames in RATE_WINDOW
 # (10 sockets x 30 would otherwise allow 300). Over it, the socket that sent the frame closes (1008).
-ACCOUNT_RATE_FRAMES = 60
+ACCOUNT_RATE_FRAMES = get_settings().ws_account_frames  # WS_ACCOUNT_FRAMES; per process (workers x this in all)
 # The session row is re-read this often even on a silent socket (and on every acting frame), so a
 # session that expired or went idle closes the socket (4401) without waiting for a push.
 SESSION_RECHECK_SECONDS = 60.0

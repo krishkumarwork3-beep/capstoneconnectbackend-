@@ -83,6 +83,6 @@ def get_file(purpose: Literal["avatar", "resume", "attachment"], name: Annotated
             "Content-Disposition": _disposition(False, filename, name),
             "X-Content-Type-Options": "nosniff",
             "Content-Security-Policy": "default-src 'none'; sandbox",
-            "Cache-Control": "private, max-age=86400" if purpose == "avatar" else "private, no-store",
+            "Cache-Control": "private, no-cache" if purpose == "avatar" else "private, no-store",
         },
     )

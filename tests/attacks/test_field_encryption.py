@@ -121,8 +121,12 @@ def test_seeded_rows_are_encrypted_too():
 
 def test_login_signup_and_reset_find_numbers_however_they_are_written(client):
     assert client.post("/api/auth/signup", json=NEW).status_code == 201
+    # Rewritten to the new contract: a registered number answers like a new one (no 409), and the
+    # blind index still finds it, so no second account is stored.
     again = client.post("/api/auth/signup", json={**NEW, "phone": "9999922222"})
-    assert again.status_code == 409
+    assert again.status_code == 201
+    with SessionLocal() as db:
+        assert db.scalar(text("SELECT count(*) FROM users WHERE phone_hash = :h"), {"h": crypto.phone_hash("9999922222")}) == 1
     from fastapi.testclient import TestClient
 
     from app.main import app
