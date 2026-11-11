@@ -71,7 +71,7 @@ def refresh(request: Request, response: Response, db: DB):
     """A new access token (and the next refresh token) from the refresh cookie. CSRF-checked like
     every cookie write (app.guard), rate limited per address. A refresh token works once: a
     replayed one ends the session everywhere it is used."""
-    limits.per_account(db, "refresh", f"ip:{limits.client_ip(request)}")
+    limits.refresh_attempt(db, request, request.cookies.get(refresh_cookie()))
     renewed = sessions.refresh(db, request.cookies.get(refresh_cookie()), "student")
     db.commit()
     if renewed is None:

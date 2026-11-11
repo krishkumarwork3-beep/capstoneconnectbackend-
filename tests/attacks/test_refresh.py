@@ -137,10 +137,20 @@ def test_refresh_needs_an_allowed_origin():
     assert c.get("/api/auth/me").status_code == 200  # nothing was rotated or revoked
 
 
-def test_refresh_is_rate_limited(monkeypatch):
-    monkeypatch.setitem(limits.WRITE_LIMITS, "refresh", (2, limits.WRITE_LIMITS["refresh"][1]))
-    c = _login()
-    assert [_refresh(c).status_code for _ in range(3)] == [204, 204, 429]
+def test_refresh_is_rate_limited_per_token_and_per_address(monkeypatch):
+    """Rewritten: the limit is per refresh token (its SHA-256) with a higher per-IP ceiling, so
+    students behind one campus NAT don't share a budget (it used to be per IP only)."""
+    monkeypatch.setitem(limits.WRITE_LIMITS, "refresh", (1, limits.WRITE_LIMITS["refresh"][1]))
+    one, two = _login(), _login()
+    stale = one.cookies.get(get_settings().refresh_cookie_name)
+    assert _refresh(one).status_code == 204  # spends the token's one try (and rotates it)
+    assert _refresh(two).status_code == 204  # same address, another token: its own budget
+    replay = TestClient(app)
+    replay.cookies.set(get_settings().refresh_cookie_name, stale)
+    r = _refresh(replay)
+    assert r.status_code == 429 and int(r.headers["retry-after"]) > 0
+    monkeypatch.setitem(limits.WRITE_LIMITS, "refresh_ip", (3, limits.WRITE_LIMITS["refresh_ip"][1]))
+    assert _refresh(_login()).status_code == 429  # the per-address ceiling (3 used above)
 
 
 def test_a_refresh_answers_the_same_whatever_is_wrong():

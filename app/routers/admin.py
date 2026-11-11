@@ -84,7 +84,7 @@ def _start_admin_session(request: Request, response: Response, db, admin: AdminU
 def admin_refresh(request: Request, response: Response, db: DB):
     """The admin portal's refresh: same rules as students' (rotation, replay ends the session,
     CSRF-checked, limited per address)."""
-    limits.per_account(db, "refresh", f"ip:{limits.client_ip(request)}")
+    limits.refresh_attempt(db, request, request.cookies.get(admin_refresh_cookie()))
     renewed = sessions.refresh(db, request.cookies.get(admin_refresh_cookie()), "admin")
     db.commit()
     admin = db.get(AdminUser, renewed.subject_id) if renewed else None

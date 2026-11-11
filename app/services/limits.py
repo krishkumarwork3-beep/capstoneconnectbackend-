@@ -6,6 +6,7 @@ server shares the same counts. When a key is over its limit the request is refus
 message saying when to try again, and a `Retry-After` header.
 """
 
+import hashlib
 import math
 import random
 from dataclasses import dataclass
@@ -127,7 +128,10 @@ WRITE_LIMITS: dict[str, tuple[int, timedelta]] = {
     # Socket only, but per account: ten sockets don't get ten times the budget.
     "typing": (60, timedelta(minutes=1)),
     "ws_ticket": (60, timedelta(minutes=10)),
-    "refresh": (60, timedelta(minutes=10)),  # POST /api/auth/refresh and the admin one, per IP address
+    # POST /api/auth/refresh and the admin one: per refresh token (its SHA-256), so a campus NAT
+    # doesn't share one budget, with a much higher ceiling per IP address.
+    "refresh": (60, timedelta(minutes=10)),
+    "refresh_ip": (600, timedelta(minutes=10)),
     "stats_read": (60, timedelta(minutes=1)),  # GET /api/stats/signups, per signed-in account
     # Reads (app.services.reads): the counts come from the READ_* settings; these are the windows.
     "read_profile_view": (300, timedelta(minutes=10)),
@@ -149,3 +153,9 @@ def per_account(db: Session, action: str, who: str, limit: int | None = None) ->
     db.commit()
     if count > limit:
         raise _refuse(start + window - datetime.now(UTC))
+
+
+def refresh_attempt(db: Session, request, token: str | None) -> None:
+    """One refresh on the presented token's budget and on the address's (much higher) ceiling."""
+    per_account(db, "refresh_ip", f"ip:{client_ip(request)}")
+    per_account(db, "refresh", "tok:" + hashlib.sha256((token or "").encode("utf-8", "surrogatepass")).hexdigest())
