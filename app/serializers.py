@@ -11,10 +11,14 @@ def mask_phone(normalized: str) -> str:
     return f"{'+' + country + ' ' if country else ''}{national[:2]}••• ••{national[-3:]}"
 
 
-def user_out(user: User, show_phone: bool = True) -> schemas.UserOut:
+def user_out(user: User, show_phone: bool = True, *, viewer: str | None = None,
+             contacts: set[str] | None = None) -> schemas.UserOut:
     """`show_phone`: the full number for the student themselves, their group and the people they
     accepted a request or invitation with (app.services.groups.phone_visible_ids); a masked one
-    for everyone else."""
+    for everyone else. Minimum fields per viewer: `viewer` is who asks (None: the account itself).
+    Others never get `created_at`, and get `last_seen` only if they share a conversation
+    (`contacts`, app.services.chat.contacts): chat is the only place that shows it."""
+    own = viewer is None or viewer == user.id
     membership = user.membership
     return schemas.UserOut(
         id=user.id,
@@ -34,8 +38,8 @@ def user_out(user: User, show_phone: bool = True) -> schemas.UserOut:
         group_role=membership.role if membership else None,  # type: ignore[arg-type]
         github_verified=bool(user.github_verified),
         github_contribution_count=user.github_contribution_count,
-        last_seen=user.last_seen,
-        created_at=user.created_at,
+        last_seen=user.last_seen if own or user.id in (contacts or set()) else None,
+        created_at=user.created_at if own else None,
     )
 
 

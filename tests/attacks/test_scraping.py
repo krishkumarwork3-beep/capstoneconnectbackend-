@@ -146,3 +146,20 @@ def test_api_answers_are_not_indexed_or_cached(as_user):
     r = as_user("usr_1").get("/api/users")
     assert r.headers["x-robots-tag"].startswith("noindex")
     assert r.headers["cache-control"] == "no-store"
+
+
+# --- F4: minimum fields per viewer ------------------------------------------------------------
+
+def test_a_strangers_profile_has_no_join_date_or_last_seen(as_user):
+    stranger = as_user("usr_8").get("/api/users/usr_3").json()  # no shared conversation
+    assert stranger["created_at"] is None and stranger["last_seen"] is None
+    listed = {u["id"]: u for u in as_user("usr_8").get("/api/users", params={"limit": 50}).json()["items"]}
+    assert all(u["created_at"] is None for i, u in listed.items() if i != "usr_8")
+
+
+def test_last_seen_only_for_people_you_chat_with_and_your_own_account(as_user):
+    lead = as_user("usr_1")  # usr_1 and usr_2 share conv_2
+    partner = lead.get("/api/users/usr_2").json()
+    assert partner["last_seen"] is not None and partner["created_at"] is None
+    me = lead.get("/api/auth/me").json()
+    assert me["created_at"] is not None and me["last_seen"] is not None

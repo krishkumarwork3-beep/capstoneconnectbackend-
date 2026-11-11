@@ -53,8 +53,8 @@ class UserOut(Out):
     group_role: GroupRole | None = None
     github_verified: bool = False
     github_contribution_count: int | None = Field(default=None, ge=0, le=10**9)  # ignored: the server counts
-    last_seen: datetime | None = None
-    created_at: datetime
+    last_seen: datetime | None = None  # the account itself, and people it shares a conversation with
+    created_at: datetime | None = None  # the account itself only
 
 
 class AvatarOut(Out):

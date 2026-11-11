@@ -14,7 +14,7 @@ from app.deps import DB, CurrentUser, PathId
 from app.errors import AppError, not_found
 from app.models import GroupMember, User
 from app.serializers import request_out, user_out
-from app.services import github, groups, reads, uploads
+from app.services import chat, github, groups, reads, uploads
 from app.services import limits as write_limits
 
 log = logging.getLogger(__name__)
@@ -81,8 +81,9 @@ def list_users(
     rows = db.scalars(stmt.offset(start).limit(limit + 1)).unique().all()
     items, more = rows[:limit], len(rows) > limit
     visible = groups.phone_visible_ids(db, me, [u.id for u in items])
+    known = chat.contacts(db, me.id)
     return {
-        "items": [user_out(u, u.id in visible) for u in items],
+        "items": [user_out(u, u.id in visible, viewer=me.id, contacts=known) for u in items],
         "nextCursor": reads.make_cursor("users", me.id, start + limit) if more else None,
         "hasMore": more,
     }
@@ -94,7 +95,7 @@ def get_user(user_id: PathId, db: DB, me: CurrentUser, background: BackgroundTas
     user = _get_user(db, user_id)
     if user.github_verified and github.is_stale(user.github_synced_at):
         background.add_task(github.sync_user, user.id, True)  # the next view shows the fresh total
-    return user_out(user, user.id in groups.phone_visible_ids(db, me, [user.id]))
+    return user_out(user, user.id in groups.phone_visible_ids(db, me, [user.id]), viewer=me.id, contacts=chat.contacts(db, me.id))
 
 
 @router.patch("/{user_id}", response_model=schemas.UserOut)
