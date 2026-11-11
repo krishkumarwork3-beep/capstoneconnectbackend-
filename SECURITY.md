@@ -197,3 +197,14 @@ These are outside the code and were deliberately left out of this round:
 | Fields per viewer | `created_at` only for the account itself; `last_seen` only for people you chat with | `test_scraping.py` |
 | API docs in production | 404 unless `API_DOCS_ENABLED=true` | `test_production.py::test_api_docs_are_off_in_production_unless_enabled` |
 | Notes, "enc:" plaintext | Notes encrypted (migration b1c2d3e4f5a6); `admin_cli encrypt-pending` seals any value that isn't valid ciphertext for its row | `test_field_encryption.py` |
+
+## Pre-deployment round (2026-11-11)
+
+| Change | Behaviour | Tests |
+| --- | --- | --- |
+| Sign-up for a registered number | Same 201 and body shape as a new account, after the same password hashing; no session, nothing stored; the owner gets an SMS ("you already have an account"). Rate limits unchanged. Residual signal: no session cookie is set (closing it needs phone verification before sign-up) | `test_auth.py`, `test_security.py`, `test_races.py`, `test_field_encryption.py` |
+| Refresh replay grace | 5 s (`REFRESH_REUSE_GRACE_SECONDS`, 0-30); one use per token and family revocation on replay unchanged | `test_refresh.py::test_the_two_tab_grace_is_five_seconds_and_a_setting` |
+| Refresh cookie scope | Access cookie `__Host-`, `Path=/`; refresh cookie `__Secure-` (Secure, no Domain, host-only), `Path=/api/auth` (student) or `/api/admin/auth` (admin): not sent with other requests | `test_tokens_sessions.py` (both layouts) |
+| Avatars | `Cache-Control: private, no-cache` (revalidated, so a shared browser's cache does not show a photo after sign-out) | `test_security.py::test_avatars_and_resumes_need_a_sign_in` |
+| WebSocket frame cap | `WS_ACCOUNT_FRAMES` (default 60 per 10 s) is counted per API process: the effective cap is workers x the limit | `test_ws_final.py` |
+| check_config (production) | Fatal: CORS_ORIGINS or PUBLIC_BASE_URL on localhost or http, ALLOWED_HOSTS empty or `*`. Warning only: empty GITHUB_TOKEN. Exit 1 only on a fatal problem | `test_production.py`, `test_config_examples.py` |

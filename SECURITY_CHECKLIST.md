@@ -63,3 +63,10 @@ what covers each class and which test proves it.
 - [ ] Production site/portal builds set `NEXT_PUBLIC_USE_MOCK` explicitly and the API URL (the build fails otherwise).
 - [ ] After a restore or a manual SQL change: `python -m app.admin_cli encrypt-pending`.
 - [ ] A new admin read of personal data: per-admin limit + `ops.record` audit entry.
+
+## Since the pre-deployment round (2026-11-11)
+- [ ] Vercel: site `NEXT_PUBLIC_USE_MOCK` (+ `NEXT_PUBLIC_API_BASE_URL`, `NEXT_PUBLIC_WS_URL` for the real site); portal `VITE_API_BASE_URL` (DEPLOY.md "Vercel settings").
+- [ ] API env: `CORS_ORIGINS` and `PUBLIC_BASE_URL` are the public https addresses, `ALLOWED_HOSTS` names the API host (check_config fails otherwise); `GITHUB_TOKEN` set (or accept anonymous limits).
+- [ ] SMS works in production (sign-up for a registered number texts the owner; password reset).
+- [ ] Reverse proxy passes the refresh cookie to `/api/auth/*` and `/api/admin/auth/*` (path-scoped) and does not cache avatars publicly.
+- [ ] WebSocket frame cap: effective per account = `WEB_CONCURRENCY` x `WS_ACCOUNT_FRAMES`.
