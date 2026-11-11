@@ -102,7 +102,7 @@ Production (and Preview) environment, then redeploy.
 |---|---|---|
 | Framework preset | Next.js | Vite |
 | Root directory | `3dcapconnectfrontend` | `adminportal` |
-| Build command | `next build` (default) | `npm run build` (`tsc -b && vite build`) |
+| Build command | from `vercel.json`: `next build` with `NEXT_PUBLIC_USE_MOCK` defaulting to `true` (the demo) when the project does not set it | `npm run build` (`tsc -b && vite build`) |
 | Output directory | default (`.next`) | `dist` |
 | Install command | `npm ci` | `npm ci` |
 | Demo (mock data, no API) | `NEXT_PUBLIC_USE_MOCK=true` | not supported: the portal always needs the API |
