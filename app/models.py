@@ -137,7 +137,9 @@ class JoinRequest(Base):
     receiver_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     type: Mapped[str] = mapped_column(String(20))  # "join_request" | "invitation"
     status: Mapped[str] = mapped_column(String(20), default="pending")
-    note: Mapped[str | None] = mapped_column(Text)
+    # Written by one student to another (or to a lead): encrypted at rest (AES-256-GCM).
+    _note_ct: Mapped[str | None] = mapped_column("note", Text)
+    note = EncryptedField("_note_ct", "join_requests", "note")
     created_at: Mapped[datetime] = _now_column()
     updated_at: Mapped[datetime] = _now_column(onupdate=utcnow)
 
@@ -285,7 +287,9 @@ class Recommendation(Base):
     group_id: Mapped[str | None] = mapped_column(ForeignKey("groups.id", ondelete="SET NULL"), index=True)
     recommender_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     student_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
-    note: Mapped[str | None] = mapped_column(Text)
+    # Written by one student to another (or to a lead): encrypted at rest (AES-256-GCM).
+    _note_ct: Mapped[str | None] = mapped_column("note", Text)
+    note = EncryptedField("_note_ct", "recommendations", "note")
     status: Mapped[str] = mapped_column(String(20), default="pending")  # pending|invited|dismissed|closed
     created_at: Mapped[datetime] = _now_column()
     updated_at: Mapped[datetime] = _now_column(onupdate=utcnow)

@@ -329,3 +329,69 @@ def test_the_migration_back_fills_is_idempotent_and_reversible():
         with admin.connect() as c:
             c.execute(text("DROP DATABASE IF EXISTS capstoneconnect_migration_test WITH (FORCE)"))
         admin.dispose()
+
+
+# --- F7: notes written by students are encrypted ----------------------------------------------
+
+def test_join_request_and_recommendation_notes_are_ciphertext_at_rest(as_user):
+    looking = as_user("usr_8")
+    req = looking.post("/api/groups/grp_4/join-requests", json={"note": "my number is 98765 44444"})
+    assert req.status_code == 201, req.text
+    with SessionLocal() as db:
+        raw = db.execute(text("SELECT note FROM join_requests WHERE id = :id"), {"id": req.json()["id"]}).scalar()
+    assert raw.startswith("enc:") and "98765" not in raw
+    assert crypto.decrypt(raw, "join_requests", "note", req.json()["id"]) == "my number is 98765 44444"
+    sent = {r["id"]: r for r in looking.get("/api/requests", params={"direction": "sent"}).json()}
+    assert sent[req.json()["id"]]["note"] == "my number is 98765 44444"  # served decrypted to its author
+
+
+def test_the_notes_migration_seals_plaintext_even_when_it_starts_with_enc(monkeypatch):
+    from importlib.util import module_from_spec, spec_from_file_location
+    from types import SimpleNamespace
+
+    from app.db import engine
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                        "alembic", "versions", "b1c2d3e4f5a6_encrypt_notes.py")
+    spec = spec_from_file_location("encrypt_notes_migration", path)
+    migration = module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    with engine.begin() as conn:
+        rid = conn.execute(text("SELECT id FROM join_requests LIMIT 1")).scalar()
+        conn.execute(text("UPDATE join_requests SET note = 'enc:looks sealed but is not' WHERE id = :id"), {"id": rid})
+        monkeypatch.setattr(migration, "op", SimpleNamespace(get_bind=lambda: conn))
+        migration.upgrade()
+        once = conn.execute(text("SELECT note FROM join_requests WHERE id = :id"), {"id": rid}).scalar()
+        migration.upgrade()  # idempotent
+        assert conn.execute(text("SELECT note FROM join_requests WHERE id = :id"), {"id": rid}).scalar() == once
+        assert crypto.decrypt(once, "join_requests", "note", rid) == "enc:looks sealed but is not"
+        migration.downgrade()  # reversible
+        assert conn.execute(text("SELECT note FROM join_requests WHERE id = :id"), {"id": rid}).scalar() == "enc:looks sealed but is not"
+
+
+def test_rotation_covers_the_notes(monkeypatch):
+    with SessionLocal() as db:
+        rid = db.execute(text("SELECT id FROM join_requests WHERE note IS NOT NULL AND note <> '' LIMIT 1")).scalar()
+    s = get_settings()
+    monkeypatch.setattr(s, "field_encryption_keys", f"k3:{_key()},{s.field_encryption_keys}")
+    with SessionLocal() as db:
+        assert rotate(db)["join_requests"] > 0
+        assert crypto.key_id_of(db.execute(text("SELECT note FROM join_requests WHERE id = :id"), {"id": rid}).scalar()) == "k3"
+
+
+# --- F8: values that aren't valid ciphertext are found and sealed ------------------------------
+
+def test_encrypt_pending_seals_plaintext_that_starts_with_enc(as_user):
+    from app.services.key_rotation import encrypt_pending
+
+    mid = as_user(LEAD).post("/api/conversations/conv_2/messages", json={"text": "placeholder"}).json()["id"]
+    with SessionLocal() as db:
+        db.execute(text("UPDATE messages SET text = 'enc:hello' WHERE id = :id"), {"id": mid})
+        db.commit()
+    with SessionLocal() as db, pytest.raises(crypto.FieldCryptoError):
+        _ = db.get(Message, mid).text  # fails closed until sealed
+    with SessionLocal() as db:
+        assert encrypt_pending(db)["messages"] >= 1
+        assert encrypt_pending(db)["messages"] == 0  # idempotent
+    with SessionLocal() as db:
+        assert db.get(Message, mid).text == "enc:hello"
+    assert crypto.is_sealed_for("enc:hello", "messages", "text", mid) is False

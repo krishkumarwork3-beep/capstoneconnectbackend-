@@ -146,6 +146,11 @@ Tests: `tests/attacks/test_field_encryption.py`.
 | `messages.text` | Yes | Private chat content. Never searched in SQL. |
 | `conversations.last_message_text` | Yes | A copy of the latest message (the chat list preview). |
 | `reports.snapshot`, `reports.details` | Yes | Copies of reported messages and what the reporter wrote. |
+| `join_requests.note`, `recommendations.note` | Yes | Written by one student to another (or to a lead); shown only to the two sides. Never searched. |
+| `groups.description`, `groups.name`, `groups.requirements` | No | Public to every signed-in student and searched on the board; encrypting would protect nothing from the API's users and break search. |
+| `announcements.text` | No | Admin-written banners shown to everyone. |
+| `users.ban_reason`, `banned_phones.reason`, `reports.handled_by` | No | Written by admins, shown only in the admin portal; staff notes, not student content. |
+| `audit_log.summary` | No (masked) | Searched by admins; numbers are masked and message text is never copied into it. |
 | `rate_limits.key`, `login_lockouts.key` | Not stored | Keys use the phone's blind index, never the number. |
 | `audit_log.summary`, `audit_log.detail` | No (masked) | Admin search runs over it; phone numbers are written masked (`+91 98••• ••210`). |
 | `users.name`, `college`, `department`, `bio`, `skills`, `github_url`, `passing_year` | No | Profile data shown to every signed-in student and searched by Discover; encrypting it would protect nothing from the API's own users and break search. |
@@ -180,3 +185,15 @@ These are outside the code and were deliberately left out of this round:
 - A secrets manager or KMS to hold `SECRET_KEY`, `FIELD_ENCRYPTION_KEYS` and `BLIND_INDEX_KEY` (and back them up: losing the field keys loses the encrypted data), with access logging.
 - Database, disk, backup and object-storage (uploads) encryption at rest.
 - DNS hardening (CAA records, DNSSEC).
+
+## Fix round (2026-11-11)
+
+| Finding | Covered by | Tests |
+| --- | --- | --- |
+| Renewal signed people out on 429/5xx/network | Three-state refresh (ok / expired = 401 only / unavailable); only "expired" signs out; Retry-After back-off; refresh limited per token (SHA-256) with a 600/10 min per-IP ceiling | `tests/unit/renewal.test.ts` (site, portal), `test_refresh.py::test_refresh_is_rate_limited_per_token_and_per_address` |
+| Production builds fell back to the mock or localhost | `next.config.ts` / `vite.config.ts` refuse a production build without an explicit `NEXT_PUBLIC_USE_MOCK` and an API URL | `tests/unit/transport.test.ts` (site, portal) |
+| Unsafe settings were fatal only with COOKIE_SECURE | `APP_ENV=production`: every fatal problem stops startup; COOKIE_SECURE=false and SMS_PROVIDER=console are fatal | `test_production.py` |
+| Admin bulk exports and chat reads | Export is POST + password again, full admins, 5/h; chat list and reads 60/h; all audited (reason optional); list paged in SQL | `test_admin.py`, `test_audit.py` |
+| Fields per viewer | `created_at` only for the account itself; `last_seen` only for people you chat with | `test_scraping.py` |
+| API docs in production | 404 unless `API_DOCS_ENABLED=true` | `test_production.py::test_api_docs_are_off_in_production_unless_enabled` |
+| Notes, "enc:" plaintext | Notes encrypted (migration b1c2d3e4f5a6); `admin_cli encrypt-pending` seals any value that isn't valid ciphertext for its row | `test_field_encryption.py` |

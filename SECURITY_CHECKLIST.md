@@ -57,3 +57,9 @@ what covers each class and which test proves it.
 - [ ] WAF / bot rules, CDN, edge rate limiting.
 - [ ] Secrets manager / KMS for SECRET_KEY, FIELD_ENCRYPTION_KEYS, BLIND_INDEX_KEY (with backups).
 - [ ] Database, disk, backup and upload-bucket encryption at rest; DNS hardening.
+
+## Since the 2026-11-11 fix round
+- [ ] Production API env has `APP_ENV=production` (unsafe settings stop it) and `API_DOCS_ENABLED` unset unless docs are meant to be public.
+- [ ] Production site/portal builds set `NEXT_PUBLIC_USE_MOCK` explicitly and the API URL (the build fails otherwise).
+- [ ] After a restore or a manual SQL change: `python -m app.admin_cli encrypt-pending`.
+- [ ] A new admin read of personal data: per-admin limit + `ops.record` audit entry.

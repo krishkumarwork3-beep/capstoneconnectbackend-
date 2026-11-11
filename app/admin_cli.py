@@ -4,6 +4,7 @@
     uv run python -m app.admin_cli password you@example.com                # sets a new password
     uv run python -m app.admin_cli list
     uv run python -m app.admin_cli rotate-keys   # re-encrypts fields with the active key (app.crypto)
+    uv run python -m app.admin_cli encrypt-pending  # encrypts any value that isn't valid ciphertext yet
 """
 
 import argparse
@@ -41,7 +42,19 @@ def main() -> None:
     reset.add_argument("email")
     sub.add_parser("list")
     sub.add_parser("rotate-keys", help="re-encrypt every encrypted field with the first FIELD_ENCRYPTION_KEYS key")
+    sub.add_parser("encrypt-pending", help="encrypt values that are not valid ciphertext for their row (plaintext left behind)")
     args = parser.parse_args()
+
+    if args.command == "encrypt-pending":
+        from app.services.key_rotation import encrypt_pending
+
+        with SessionLocal() as db:
+            sealed = encrypt_pending(db)
+            db.add(AuditLog(id=new_id("aud"), admin_email="command line", action="security.encrypt_pending", target_type="system",
+                            target_id="field_encryption", summary=f"Encrypted values left in plaintext: {sealed}"))
+            db.commit()
+        print(f"Encrypted: {sealed}")
+        return
 
     if args.command == "rotate-keys":
         from app.services.key_rotation import rotate

@@ -19,6 +19,8 @@ FIELDS = [
     ("messages", "id", ["text"]),
     ("conversations", "id", ["last_message_text"]),
     ("reports", "id", ["details", "snapshot"]),
+    ("join_requests", "id", ["note"]),
+    ("recommendations", "id", ["note"]),
 ]
 
 
@@ -83,3 +85,37 @@ def rotate(db: Session) -> dict[str, int]:
     db.commit()
     changed["banned_phones"] = count
     return changed
+
+
+def encrypt_pending(db: Session) -> dict[str, int]:
+    """Encrypts every value that is not a valid ciphertext for its row: plaintext left behind by
+    an interrupted back-fill, or plaintext that happened to start with "enc:" (which the first
+    field-encryption migration skipped). Idempotent. {table: values sealed}."""
+    sealed: dict[str, int] = {}
+    for name, id_col, cols in FIELDS:
+        table = _table(name, id_col, cols, "phone_hash") if name == "users" else _table(name, id_col, cols)
+        count = 0
+        for rows in _batches(db, table, id_col, cols):
+            for row in rows:
+                row_id, current = row[0], dict(zip(cols, row[1:], strict=True))
+                stale = {c: v for c, v in current.items() if not crypto.is_sealed_for(v, name, c, row_id)}
+                if not stale:
+                    continue
+                values = {c: crypto.encrypt(v, name, c, row_id) for c, v in stale.items()}
+                if name == "users" and "phone_normalized" in stale:
+                    values["phone_hash"] = crypto.blind_index(normalize_phone(stale["phone_normalized"]))
+                db.execute(sa.update(table).where(table.c[id_col] == row_id).values(**values))
+                count += len(stale)
+            db.commit()
+        sealed[name] = count
+    banned = _table("banned_phones", "phone_hash", ["phone_normalized", "phone"])
+    count = 0
+    for row_hash, number, typed in db.execute(sa.select(banned.c.phone_hash, banned.c.phone_normalized, banned.c.phone)).all():
+        values = {c: crypto.encrypt(v, "banned_phones", c, row_hash) for c, v in (("phone_normalized", number), ("phone", typed))
+                  if not crypto.is_sealed_for(v, "banned_phones", c, row_hash)}
+        if values:
+            db.execute(sa.update(banned).where(banned.c.phone_hash == row_hash).values(**values))
+            count += len(values)
+    db.commit()
+    sealed["banned_phones"] = count
+    return sealed

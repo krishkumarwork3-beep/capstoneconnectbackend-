@@ -117,3 +117,16 @@ def phone_hash(phone: str) -> str:
     from app.security import normalize_phone
 
     return blind_index(normalize_phone(phone))
+
+
+def is_sealed_for(stored: str | None, table: str, column: str, row_id: str) -> bool:
+    """True when `stored` is empty/None or a ciphertext that decrypts for exactly this place.
+    Plaintext that merely starts with "enc:" is not sealed (the old LIKE 'enc:%' check let it
+    through)."""
+    if stored is None or stored == "":
+        return True
+    try:
+        decrypt(stored, table, column, row_id)
+        return True
+    except FieldCryptoError:
+        return False
