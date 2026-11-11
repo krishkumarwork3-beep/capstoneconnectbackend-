@@ -162,7 +162,7 @@ def test_last_seen_only_for_people_you_chat_with_and_your_own_account(as_user):
 
     from app.models import User, utcnow
     with SessionLocal() as db:
-        db.execute(update(User).where(User.id.in_(["usr_2", "usr_3"])).values(last_seen=utcnow()))
+        db.execute(update(User).where(User.id.in_(["usr_1", "usr_2", "usr_3"])).values(last_seen=utcnow()))
         db.commit()
     assert as_user("usr_8").get("/api/users/usr_3").json()["last_seen"] is None  # no shared conversation
     lead = as_user("usr_1")  # usr_1 and usr_2 share conv_2
