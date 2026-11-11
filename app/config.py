@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     read_throttle_minutes: int = Field(default=15, ge=1)
     session_max_days: int = Field(default=30, ge=1, le=30)
     # Cookies need Secure over HTTPS (production); local http://localhost needs it off.
+    # "production" makes every unsafe setting stop the API at startup (app.check_config), whatever
+    # COOKIE_SECURE says; it also turns the API docs off (API_DOCS_ENABLED to keep them).
+    app_env: Literal["development", "production"] = "development"
     cookie_secure: bool = False
     cookie_name: str = "cc_session"
     # "lax" (default) when the site and the API share a site (subdomains of one domain, or one

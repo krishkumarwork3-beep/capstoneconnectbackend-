@@ -172,7 +172,7 @@ SAFE = dict(COOKIE_SECURE="true", SECRET_KEY=STRONG_KEY, DEMO_LOGIN="false", ALL
             CORS_ORIGINS='["https://app.example.com"]', PUBLIC_BASE_URL="https://api.example.com", ADMIN_PASSWORD="",
             # Production needs its own field-encryption and blind-index keys (never the development ones).
             FIELD_ENCRYPTION_KEYS="p1:MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
-            BLIND_INDEX_KEY="ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA=")
+            BLIND_INDEX_KEY="ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA=", APP_ENV="production")
 
 
 def _check_config(**env) -> subprocess.CompletedProcess:
@@ -190,6 +190,9 @@ def test_check_config_exit_codes():
     {"DEMO_LOGIN": "true"},
     {"ALLOW_DEV_CODE": "true"},
     {"FIELD_ENCRYPTION_KEYS": DEV_FIELD_ENCRYPTION_KEYS},
+    # APP_ENV=production: fatal even without COOKIE_SECURE, and these three become fatal too.
+    {"COOKIE_SECURE": "false"},
+    {"SMS_PROVIDER": "console"},
     {"BLIND_INDEX_KEY": DEV_BLIND_INDEX_KEY},
 ])
 def test_the_api_refuses_to_start_unsafe_on_https(override):
@@ -201,6 +204,26 @@ def test_the_api_refuses_to_start_unsafe_on_https(override):
         server.stop()
     assert code != 0
     assert "Unsafe settings for a public server" in output and next(iter(override)) in output
+
+
+def test_a_short_secret_key_never_starts():
+    """Settings refuse a SECRET_KEY under 32 characters outright (min_length), in any environment."""
+    server = Server(**{**SAFE, "SECRET_KEY": "short-but-not-the-default-key"})
+    try:
+        assert server.proc.wait(timeout=60) != 0
+        assert "SECRET_KEY" in server.output() or "secret_key" in server.output()
+    finally:
+        server.stop()
+
+
+def test_a_development_laptop_only_warns():
+    """Without APP_ENV=production and without COOKIE_SECURE the same settings only warn (and the
+    CI step `! uv run python -m app.check_config` still exits 1 on them)."""
+    from app.check_config import startup_check
+    from app.config import Settings
+
+    startup_check(Settings(app_env="development", cookie_secure=False, sms_provider="console", secret_key=DEV_SECRET_KEY))
+    assert _check_config(APP_ENV="development", COOKIE_SECURE="false", SECRET_KEY=DEV_SECRET_KEY).returncode == 1
 
 
 def test_a_safe_https_config_starts():
