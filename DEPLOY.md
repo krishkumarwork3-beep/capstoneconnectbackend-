@@ -92,6 +92,28 @@ this on Vercel). The build's `index.html` carries its CSP for that API; `dist/_h
 Cloudflare Pages) and `vercel.json` add frame protection. Keep it private if you can (an IP
 allow-list or the host's password protection) and serve it at `admin.example.com`.
 
+### Vercel settings (site and portal)
+
+Both builds fail closed: a production build without the variables below stops with an error that
+names them (this is the "Deployment has failed" check on a new Vercel project). Set them for the
+Production (and Preview) environment, then redeploy.
+
+| Setting | Student site | Admin portal |
+|---|---|---|
+| Framework preset | Next.js | Vite |
+| Root directory | `3dcapconnectfrontend` | `adminportal` |
+| Build command | `next build` (default) | `npm run build` (`tsc -b && vite build`) |
+| Output directory | default (`.next`) | `dist` |
+| Install command | `npm ci` | `npm ci` |
+| Demo (mock data, no API) | `NEXT_PUBLIC_USE_MOCK=true` | not supported: the portal always needs the API |
+| Real site | `NEXT_PUBLIC_USE_MOCK=false`<br>`NEXT_PUBLIC_API_BASE_URL=https://api.example.com/api`<br>`NEXT_PUBLIC_WS_URL=wss://api.example.com/api/ws` (optional; derived from the API URL when empty) | `VITE_API_BASE_URL=https://api.example.com/api` |
+| SPA routes | handled by Next.js | `vercel.json` rewrites `/(.*)` → `/index.html` |
+| Security headers | sent by `next.config.ts` (CSP from the API URL) | `vercel.json` headers + CSP `<meta>` in `index.html` |
+
+The API URLs must be `https://` / `wss://` (plain http is refused except for localhost). Nothing
+calls the API while building, so the build succeeds even when the API is down; live data is
+fetched in the browser.
+
 ## 6. Upload limits across the stack
 
 | Layer | Limit |
