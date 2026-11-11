@@ -8,6 +8,7 @@ import pytest
 
 from app.services import github
 from tests.attacks import payloads
+from tests.conftest import ADMIN_PASSWORD
 
 BAD_LINKS = [
     "javascript:alert(1)", "JAVASCRIPT:alert(1)", " javascript:alert(1)", "java\tscript:alert(1)",
@@ -45,7 +46,7 @@ def test_github_repo_links_are_rebuilt_not_trusted():
 
 
 def _export(admin) -> list[list[str]]:
-    r = admin.get("/api/admin/users/export.csv")
+    r = admin.post("/api/admin/users/export.csv", json={"password": ADMIN_PASSWORD})  # was a GET (needs the password now)
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/csv")
     assert r.headers["content-disposition"].startswith("attachment;")
@@ -71,7 +72,7 @@ def test_csv_export_is_bounded(admin_client, monkeypatch):
     from app.routers import admin as admin_routes
 
     monkeypatch.setattr(admin_routes, "EXPORT_LIMIT", 3)
-    r = admin_client().get("/api/admin/users/export.csv")
+    r = admin_client().post("/api/admin/users/export.csv", json={"password": ADMIN_PASSWORD})
     assert r.status_code == 422
     assert "filter" in r.json()["message"].lower()
 

@@ -132,6 +132,9 @@ WRITE_LIMITS: dict[str, tuple[int, timedelta]] = {
     # doesn't share one budget, with a much higher ceiling per IP address.
     "refresh": (60, timedelta(minutes=10)),
     "refresh_ip": (600, timedelta(minutes=10)),
+    # Admin data pulls, per admin (every one is also in the audit log).
+    "admin_export": (5, timedelta(hours=1)),
+    "admin_chat_read": (60, timedelta(hours=1)),
     "stats_read": (60, timedelta(minutes=1)),  # GET /api/stats/signups, per signed-in account
     # Reads (app.services.reads): the counts come from the READ_* settings; these are the windows.
     "read_profile_view": (300, timedelta(minutes=10)),

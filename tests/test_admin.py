@@ -193,7 +193,7 @@ def test_bulk_and_csv(admin_client):
     assert r.json() == {"done": 2, "skipped": ["nope"]}
     banned = admin.get("/api/admin/users", params={"status": "banned"}).json()
     assert {u["id"] for u in banned["items"]} == {LOOKING, "usr_7"}
-    csv = admin.get("/api/admin/users/export.csv")
+    csv = admin.post("/api/admin/users/export.csv", json={"password": ADMIN_PASSWORD})  # POST + password now
     assert csv.headers["content-type"].startswith("text/csv")
     lines = csv.text.strip().splitlines()
     assert lines[0].startswith("id,name,phone") and len(lines) > 15
@@ -362,3 +362,55 @@ def test_every_change_is_audited(admin_client):
     assert log[:4] == ["user.update", "phone.block", "user.unban", "user.ban"]
     filtered = admin.get("/api/admin/audit", params={"action": "user."}).json()["items"]
     assert {row["action"] for row in filtered} == {"user.update", "user.unban", "user.ban"}
+
+
+# --- F5: admin data pulls are re-authenticated, limited and audited ---------------------------
+
+def _audit(admin, action: str) -> list[dict]:
+    return [e for e in admin.get("/api/admin/audit", params={"action": action}).json()["items"] if e["action"] == action]
+
+
+def test_the_export_needs_the_password_again_and_is_audited(admin_client):
+    admin = admin_client()
+    assert admin.get("/api/admin/users/export.csv").status_code in (404, 405)  # no GET any more
+    assert admin.post("/api/admin/users/export.csv", json={"password": "wrong-password"}).status_code == 403
+    assert admin.post("/api/admin/users/export.csv", json={}).status_code == 422
+    ok = admin.post("/api/admin/users/export.csv", json={"password": ADMIN_PASSWORD, "status": "looking"})
+    assert ok.status_code == 200
+    entry = _audit(admin, "data.export_students")[0]
+    rows = len(ok.text.strip().splitlines()) - 1
+    assert entry["detail"]["rows"] == rows and entry["detail"]["filters"]["status"] == "looking"
+
+
+def test_exports_are_limited_per_admin(admin_client, monkeypatch):
+    from app.services import limits
+    monkeypatch.setitem(limits.WRITE_LIMITS, "admin_export", (2, limits.WRITE_LIMITS["admin_export"][1]))
+    one, two = admin_client(), admin_client()
+    codes = [one.post("/api/admin/users/export.csv", json={"password": ADMIN_PASSWORD}).status_code for _ in range(3)]
+    assert codes == [200, 200, 429]
+    assert two.post("/api/admin/users/export.csv", json={"password": ADMIN_PASSWORD}).status_code == 200
+
+
+def test_chat_reads_are_audited_with_a_reason_and_limited(admin_client, monkeypatch):
+    from app.services import limits
+    admin = admin_client()
+    listed = admin.get("/api/admin/conversations", params={"reason": "report rpt_1"}).json()
+    conv = listed["items"][0]["id"]
+    assert admin.get(f"/api/admin/conversations/{conv}/messages", params={"reason": "checking a report"}).status_code == 200
+    read = _audit(admin, "data.read_messages")[0]
+    assert read["target_id"] == conv and read["detail"]["reason"] == "checking a report"
+    assert _audit(admin, "data.read_conversations")[0]["detail"]["reason"] == "report rpt_1"
+    monkeypatch.setitem(limits.WRITE_LIMITS, "admin_chat_read", (1, limits.WRITE_LIMITS["admin_chat_read"][1]))
+    other = admin_client()
+    assert other.get("/api/admin/conversations").status_code == 200
+    assert other.get(f"/api/admin/conversations/{conv}/messages").status_code == 429
+
+
+def test_the_chat_list_is_paged_and_searched_in_sql(admin_client):
+    admin = admin_client()
+    full = admin.get("/api/admin/conversations", params={"page_size": 200}).json()
+    page = admin.get("/api/admin/conversations", params={"page_size": 2, "page": 2}).json()
+    assert page["total"] == full["total"] and [c["id"] for c in page["items"]] == [c["id"] for c in full["items"][2:4]]
+    group = next(c for c in full["items"] if c["type"] == "group")
+    found = admin.get("/api/admin/conversations", params={"q": group["title"][:5]}).json()["items"]
+    assert group["id"] in {c["id"] for c in found}

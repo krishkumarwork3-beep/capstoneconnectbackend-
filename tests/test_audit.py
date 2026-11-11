@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.main import app
 from app.passwords import password_problem
-from tests.conftest import PASSWORD, PHONES
+from tests.conftest import ADMIN_PASSWORD, PASSWORD, PHONES
 
 LEAD, MEMBER, LOOKING, OTHER = "usr_1", "usr_9", "usr_6", "usr_8"
 PNG = __import__("tests.conftest", fromlist=["REAL_PNG"]).REAL_PNG  # a real 8x8 image (uploads are re-encoded)
@@ -55,6 +55,8 @@ def _write_calls(admin, ids) -> dict[tuple[str, str], tuple[str, dict | None]]:
         ("POST", "/api/admin/requests/bulk-cancel"): ("/api/admin/requests/bulk-cancel", {"ids": [ids["request"]]}),
         ("POST", "/api/admin/requests/{request_id}/cancel"): (f"/api/admin/requests/{ids['request2']}/cancel", None),
         ("POST", "/api/admin/messages/bulk-delete"): ("/api/admin/messages/bulk-delete", {"ids": [ids["message"]]}),
+        # The admin changed its password above (admin-password-2): the export asks for it again.
+        ("POST", "/api/admin/users/export.csv"): ("/api/admin/users/export.csv", {"password": "admin-password-2"}),
         ("DELETE", "/api/admin/messages/{message_id}"): (f"/api/admin/messages/{ids['message2']}", None),
         **_extra_write_calls(ids),
     }

@@ -75,6 +75,15 @@ class AdminUpdateIn(In):
     active: bool | None = None
 
 
+class ExportIn(In):
+    """POST /api/admin/users/export.csv: the admin's own password again, and the list's filters."""
+
+    password: str = Field(min_length=1, max_length=200)
+    q: str | None = Field(None, max_length=100)
+    status: Literal["all", "active", "banned", "in_group", "looking"] = "all"
+    college: str | None = Field(None, max_length=160)
+
+
 class AdminPasswordIn(In):
     current_password: str = Field(min_length=1, max_length=200)
     new_password: str = Field(min_length=MIN_PASSWORD_LENGTH, max_length=200)

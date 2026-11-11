@@ -31,6 +31,7 @@ from app.models import (
     AuditLog,
     BannedPhone,
     Conversation,
+    ConversationParticipant,
     Group,
     GroupMember,
     JoinRequest,
@@ -43,6 +44,7 @@ from app.models import (
 )
 from app.security import hash_password, new_id, normalize_phone, verify_password
 from app.services import limits, sessions
+from app.services import limits as write_limits
 from app.services import stats as stats_service
 from app.passwords import ensure_good_password
 from app.services import admin as ops
@@ -323,10 +325,16 @@ def colleges(_: CurrentAdmin, db: DB):
 EXPORT_LIMIT = 50_000
 
 
-@students.get("/users/export.csv", response_class=StreamingResponse,
-               responses={200: {"content": {"text/csv": {}}, "description": "A CSV file"}})
-def export_students(_: CurrentAdmin, db: DB, q: str | None = Query(None, max_length=100), status: StudentStatus = "all", college: str | None = Query(None, max_length=160)):
-    """Every matching student as a CSV file (opens in Excel or Google Sheets)."""
+@students.post("/users/export.csv", response_class=StreamingResponse,
+                responses={200: {"content": {"text/csv": {}}, "description": "A CSV file"}})
+def export_students(payload: s.ExportIn, admin: AdminWriter, db: DB):
+    """Every matching student as a CSV file (opens in Excel or Google Sheets). A bulk copy of
+    personal data: it needs the admin's password again, is limited per admin (ADMIN_EXPORT) and
+    is written to the audit log with its filters and row count."""
+    write_limits.per_account(db, "admin_export", admin.id)
+    if not verify_password(payload.password, admin.password_hash):
+        raise AppError("Your password is wrong", 403)
+    q, status, college = payload.q, payload.status, payload.college
     users = list(db.scalars(_student_query(q, status, college).order_by(User.created_at).limit(EXPORT_LIMIT + 1)).unique())
     if len(users) > EXPORT_LIMIT:
         raise AppError(f"More than {EXPORT_LIMIT:,} students match: filter by college or status and export in parts", 422)
@@ -340,6 +348,9 @@ def export_students(_: CurrentAdmin, db: DB, q: str | None = Query(None, max_len
                          row.github_url or "", row.github_contribution_count if row.github_contribution_count is not None else "",
                          "yes" if row.banned else "", "yes" if row.number_blocked else "",
                          row.last_seen.isoformat() if row.last_seen else "", row.created_at.isoformat()]])
+    ops.record(db, admin, "data.export_students", f"Exported {len(users)} student(s) as CSV", "users", None,
+               {"filters": {"q": q, "status": status, "college": college}, "rows": len(users)})
+    db.commit()
     stamp = utcnow().strftime("%Y%m%d-%H%M")
     return StreamingResponse(iter([buffer.getvalue()]), media_type="text/csv",
                              headers={"Content-Disposition": f'attachment; filename="capstoneconnect-students-{stamp}.csv"'})
@@ -794,31 +805,50 @@ chat_router = APIRouter(tags=["admin: chat"])
 
 @chat_router.get("/conversations", response_model=s.Page[s.ConversationRow])
 def list_conversations(
-    _: CurrentAdmin,
+    admin: CurrentAdmin,
     db: DB,
     q: str | None = Query(None, max_length=100, description="A participant's name, or a group name"),
     page: int = Query(1, ge=1, le=100_000),
     page_size: int = Query(25, ge=1, le=200),
+    reason: str | None = Query(None, max_length=200, description="Why you are looking (kept in the audit log)"),
 ):
-    convs = list(db.scalars(select(Conversation).order_by(Conversation.updated_at.desc())).unique())
-    if q:
-        needle = q.strip().lower()
-        convs = [c for c in convs if needle in ops.conversation_title(c).lower()]
-    counts = dict(db.execute(select(Message.conversation_id, func.count()).group_by(Message.conversation_id)).all())
+    """Paged in SQL. Every look at the chat list is a chat read: limited per admin and audited."""
+    write_limits.per_account(db, "admin_chat_read", admin.id)
+    stmt = select(Conversation)
+    if q and q.strip():
+        like = like_text.contains(q.strip().lower())
+        named = select(ConversationParticipant.conversation_id).join(User, User.id == ConversationParticipant.user_id).where(
+            func.lower(User.name).like(like, escape=like_text.ESCAPE))
+        groups = select(Group.id).where(func.lower(Group.name).like(like, escape=like_text.ESCAPE))
+        stmt = stmt.where(or_(Conversation.id.in_(named), Conversation.group_id.in_(groups)))
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     offset, limit = _paged(page, page_size)
+    convs = list(db.scalars(stmt.order_by(Conversation.updated_at.desc(), Conversation.id).offset(offset).limit(limit)).unique())
+    ids = [c.id for c in convs]
+    counts = dict(db.execute(select(Message.conversation_id, func.count()).where(Message.conversation_id.in_(ids))
+                             .group_by(Message.conversation_id)).all()) if ids else {}
     items = [
         s.ConversationRow(id=c.id, type=c.type, title=ops.conversation_title(c), participants=[p.user.name for p in c.participants],
                           message_count=counts.get(c.id, 0), last_message_text=c.last_message_text, last_message_at=c.last_message_at)
-        for c in convs[offset : offset + limit]
+        for c in convs
     ]
-    return {"items": items, "total": len(convs), "page": page, "page_size": page_size}
+    ops.record(db, admin, "data.read_conversations", f"Viewed the chat list (page {page}{', search' if q else ''})",
+               "conversation", None, {"q": q, "page": page, "reason": (reason or "").strip() or None})
+    db.commit()
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
 @chat_router.get("/conversations/{conversation_id}/messages", response_model=list[s.MessageRow])
-def conversation_messages(conversation_id: PathId, _: CurrentAdmin, db: DB, limit: int = Query(200, ge=1, le=1000)):
+def conversation_messages(conversation_id: PathId, admin: CurrentAdmin, db: DB, limit: int = Query(200, ge=1, le=1000),
+                          reason: str | None = Query(None, max_length=200, description="Why you are reading (kept in the audit log)")):
+    """Reading a conversation's messages: limited per admin and written to the audit log."""
+    write_limits.per_account(db, "admin_chat_read", admin.id)
     if db.get(Conversation, conversation_id) is None:
         raise not_found("Conversation")
     latest = list(db.scalars(select(Message).where(Message.conversation_id == conversation_id).order_by(Message.created_at.desc()).limit(limit)))
+    ops.record(db, admin, "data.read_messages", f"Read the messages of conversation {conversation_id}", "conversation",
+               conversation_id, {"messages": len(latest), "reason": (reason or "").strip() or None})
+    db.commit()
     return list(reversed(latest))
 
 
